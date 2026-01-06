@@ -939,8 +939,6 @@ export function activate(context: vscode.ExtensionContext) {
       }
       if (isKidsModeFeatureEnabled()) {
         pendingKidsDocClosures.add(docUri);
-      } else {
-        try { await closeEditorTabForDoc(docUri); } catch { }
       }
     },
   });
