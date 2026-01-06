@@ -12,7 +12,7 @@ export type BlocklyApi = {
     clearHighlight: (docUri: string) => void;
     highlightForLine: (docUri: string, line: number) => void;
     disposePanelsForFilePath: (fsPath: string) => void;
-    revealPanelForDocUri: (docUri: string) => void;
+    revealPanelForDocUri: (docUri: string, opts?: { preserveFocus?: boolean }) => boolean;
     disposeAllPanels: () => void;
 };
 
@@ -23,6 +23,8 @@ export function registerBlockly(
         removeFromRestore: (key: string, fsPath: string) => Promise<void> | void;
         RESTORE_BLOCKLY_KEY: string;
         updateP5WebviewTabContext: () => void;
+        notifyKidsModeFocus?: (docUri: string | undefined, isActive: boolean) => void;
+        notifyPanelDisposed?: (docUri: string | undefined) => void;
     }
 ): BlocklyApi {
     // Track all open Blockly panels and lookups by file path and document uri
@@ -148,10 +150,15 @@ export function registerBlockly(
         try {
             const selectedP5Version = cfg.getP5jsVersion();
             const versioned = path.join(context.extensionPath, 'assets', selectedP5Version, 'blockly_categories.json');
-            const fallbackV1 = path.join(context.extensionPath, 'assets', '1.11', 'blockly_categories.json');
+            const defaultFallback = path.join(context.extensionPath, 'assets', '1.11', 'blockly_categories.json');
+            const kidsFallback = path.join(context.extensionPath, 'assets', '1.11', 'blockly_kids_categories.json');
             const legacy = path.join(context.extensionPath, 'blockly', 'blockly_categories.json');
-            const allowPath = fs.existsSync(versioned) ? versioned : (fs.existsSync(fallbackV1) ? fallbackV1 : legacy);
-            if (allowPath && fs.existsSync(allowPath)) {
+            const preferKidsCategories = cfg.getBlocklyKidsMode();
+            const candidates = preferKidsCategories
+                ? [kidsFallback, versioned, defaultFallback, legacy]
+                : [versioned, defaultFallback, legacy];
+            const allowPath = candidates.find(candidate => candidate && fs.existsSync(candidate));
+            if (allowPath) {
                 const txt = fs.readFileSync(allowPath, 'utf8');
                 try {
                     const obj = JSON.parse(txt);
@@ -434,7 +441,34 @@ export function registerBlockly(
                 return;
             }
             const doc = originatingEditor.document;
-            const docUri = doc.uri.toString();
+            const docUriObj = doc.uri;
+            const docUri = docUriObj.toString();
+            const docFsPath = doc.fileName;
+            let backingDocument: vscode.TextDocument | undefined = doc;
+            const findOpenDocument = () => {
+                if (backingDocument && !backingDocument.isClosed) {
+                    return backingDocument;
+                }
+                const existing = vscode.workspace.textDocuments.find(d => d.uri.toString() === docUri);
+                if (existing && !existing.isClosed) {
+                    backingDocument = existing;
+                    return existing;
+                }
+                return undefined;
+            };
+            const ensureDocumentHandle = async (): Promise<vscode.TextDocument | undefined> => {
+                const existing = findOpenDocument();
+                if (existing) {
+                    return existing;
+                }
+                try {
+                    const reopened = await vscode.workspace.openTextDocument(docUriObj);
+                    backingDocument = reopened;
+                    return reopened;
+                } catch {
+                    return undefined;
+                }
+            };
             const text = doc.getText();
             const isEmpty = text.trim().length === 0;
             const sidecar = sidecarPathForFile(doc.fileName);
@@ -449,21 +483,26 @@ export function registerBlockly(
                 return;
             }
             const scriptName = path.basename(doc.fileName);
-            // Place Blockly in a bottom-row group if possible
-            let targetColumn: vscode.ViewColumn = vscode.ViewColumn.Active;
-            try {
-                await vscode.commands.executeCommand('workbench.action.focusFirstEditorGroup');
-                const before = vscode.window.tabGroups.activeTabGroup;
-                await vscode.commands.executeCommand('workbench.action.focusBelowGroup');
-                let after = vscode.window.tabGroups.activeTabGroup;
-                if (!after || (before && after.viewColumn === before.viewColumn)) {
-                    try { await vscode.commands.executeCommand('workbench.action.newGroupBelow'); } catch { }
+            const preferKidsLayout = cfg.getBlocklyKidsMode();
+            // Place Blockly in the top-left group for kids mode, otherwise bottom row
+            let targetColumn: vscode.ViewColumn = preferKidsLayout ? vscode.ViewColumn.One : vscode.ViewColumn.Active;
+            if (preferKidsLayout) {
+                try { await vscode.commands.executeCommand('workbench.action.focusFirstEditorGroup'); } catch { }
+            } else {
+                try {
+                    await vscode.commands.executeCommand('workbench.action.focusFirstEditorGroup');
+                    const before = vscode.window.tabGroups.activeTabGroup;
                     await vscode.commands.executeCommand('workbench.action.focusBelowGroup');
-                    await new Promise(r => setTimeout(r, 100));
-                    after = vscode.window.tabGroups.activeTabGroup;
-                }
-                if (after && typeof after.viewColumn === 'number') targetColumn = after.viewColumn as vscode.ViewColumn;
-            } catch { }
+                    let after = vscode.window.tabGroups.activeTabGroup;
+                    if (!after || (before && after.viewColumn === before.viewColumn)) {
+                        try { await vscode.commands.executeCommand('workbench.action.newGroupBelow'); } catch { }
+                        await vscode.commands.executeCommand('workbench.action.focusBelowGroup');
+                        await new Promise(r => setTimeout(r, 100));
+                        after = vscode.window.tabGroups.activeTabGroup;
+                    }
+                    if (after && typeof after.viewColumn === 'number') targetColumn = after.viewColumn as vscode.ViewColumn;
+                } catch { }
+            }
 
             const panel = vscode.window.createWebviewPanel(
                 BLOCKLY_PANEL_VIEWTYPE,
@@ -491,9 +530,15 @@ export function registerBlockly(
                 allBlocklyPanels.delete(panel);
                 try { removePanelForPath(blocklyPanelsByPath, (panel as any)._sketchFilePath || doc.fileName, panel); } catch { }
                 try { await deps.removeFromRestore(deps.RESTORE_BLOCKLY_KEY, doc.fileName); } catch { }
+                try { deps.notifyKidsModeFocus?.(docUri, false); } catch { }
+                try { deps.notifyPanelDisposed?.(docUri); } catch { }
             });
-            panel.onDidChangeViewState(() => { try { deps.updateP5WebviewTabContext(); } catch { } });
+            panel.onDidChangeViewState(() => {
+                try { deps.updateP5WebviewTabContext(); } catch { }
+                try { deps.notifyKidsModeFocus?.(docUri, panel.active); } catch { }
+            });
             panel.webview.html = buildBlocklyHtml(panel);
+            try { deps.notifyKidsModeFocus?.(docUri, panel.active); } catch { }
             try {
                 const resolved = cfg.resolveBlocklyTheme();
                 try { sendBlockly(panel, { type: 'setBlocklyTheme', theme: resolved }); } catch { }
@@ -547,10 +592,9 @@ export function registerBlockly(
                 if (!msg) return;
                 if (msg.type === 'blocklyRequestSave') {
                     try {
-                        if (!doc.isClosed) {
-                            await doc.save();
-                        } else if (originatingEditor && !originatingEditor.document.isClosed) {
-                            await originatingEditor.document.save();
+                        const targetDoc = !doc.isClosed ? doc : await ensureDocumentHandle();
+                        if (targetDoc && !targetDoc.isClosed) {
+                            await targetDoc.save();
                         } else {
                             await vscode.commands.executeCommand('workbench.action.files.save');
                         }
@@ -572,39 +616,42 @@ export function registerBlockly(
                     let wsObj: any = null;
                     try { if (msg.workspace && typeof msg.workspace === 'string') wsObj = JSON.parse(msg.workspace); } catch { wsObj = null; }
                     try { if (Array.isArray(msg.lineMap)) blocklyLineMapForDocument.set(docUri, msg.lineMap); } catch { }
-                    if (originatingEditor && !originatingEditor.document.isClosed) {
-                        try {
-                            const filePath = originatingEditor.document.fileName;
-                            const sidecar = sidecarPathForFile(filePath);
-                            if (sidecar && msg.workspace && typeof msg.workspace === 'string') {
+                    const targetDoc = !doc.isClosed ? doc : await ensureDocumentHandle();
+                    try {
+                        const filePath = docFsPath;
+                        const sidecar = sidecarPathForFile(filePath);
+                        if (sidecar && msg.workspace && typeof msg.workspace === 'string') {
+                            try {
+                                const sidecarDir = path.dirname(sidecar);
+                                fs.mkdirSync(sidecarDir, { recursive: true });
                                 try {
-                                    const sidecarDir = path.dirname(sidecar);
-                                    fs.mkdirSync(sidecarDir, { recursive: true });
-                                    try {
-                                        const payload: any = { workspace: wsObj || JSON.parse(msg.workspace) };
-                                        if (Array.isArray(msg.lineMap)) payload.lineMap = msg.lineMap;
-                                        fs.writeFileSync(sidecar, JSON.stringify(payload, null, 2), 'utf8');
-                                    } catch {
-                                        fs.writeFileSync(sidecar, msg.workspace, 'utf8');
-                                    }
-                                } catch { }
-                            }
-                            let finalCode = msg.code
-                                .replace(/\/\*@BlocklyWorkspace[\s\S]*?\*\//g, '')
-                                .replace(/\/\*@b:(?:'[^']+'|[^*]+)\*\//g, '');
-                            if (finalCode.trim().length === 0) finalCode = '';
-                            else if (!finalCode.endsWith('\n')) finalCode = finalCode + '\n';
+                                    const payload: any = { workspace: wsObj || JSON.parse(msg.workspace) };
+                                    if (Array.isArray(msg.lineMap)) payload.lineMap = msg.lineMap;
+                                    fs.writeFileSync(sidecar, JSON.stringify(payload, null, 2), 'utf8');
+                                } catch {
+                                    fs.writeFileSync(sidecar, msg.workspace, 'utf8');
+                                }
+                            } catch { }
+                        }
+                        let finalCode = msg.code
+                            .replace(/\/\*@BlocklyWorkspace[\s\S]*?\*\//g, '')
+                            .replace(/\/\*@b:(?:'[^']+'|[^*]+)\*\//g, '');
+                        if (finalCode.trim().length === 0) finalCode = '';
+                        else if (!finalCode.endsWith('\n')) finalCode = finalCode + '\n';
+                        if (targetDoc) {
                             ignoreDocumentChangeForBlockly.add(docUri);
-                            const edit = new vscode.WorkspaceEdit();
                             const fullRange = new vscode.Range(
-                                originatingEditor.document.positionAt(0),
-                                originatingEditor.document.positionAt(originatingEditor.document.getText().length)
+                                targetDoc.positionAt(0),
+                                targetDoc.positionAt(targetDoc.getText().length)
                             );
-                            edit.replace(originatingEditor.document.uri, fullRange, finalCode);
+                            const edit = new vscode.WorkspaceEdit();
+                            edit.replace(targetDoc.uri, fullRange, finalCode);
                             await vscode.workspace.applyEdit(edit);
-                            await originatingEditor.document.save();
-                        } catch { }
-                    }
+                            await targetDoc.save();
+                        } else {
+                            try { fs.writeFileSync(filePath, finalCode, 'utf8'); } catch { }
+                        }
+                    } catch { }
                     setTimeout(() => ignoreDocumentChangeForBlockly.delete(docUri), 300);
                 }
             });
@@ -807,13 +854,16 @@ export function registerBlockly(
         } catch { }
     }
 
-    function revealPanelForDocUri(docUri: string) {
+    function revealPanelForDocUri(docUri: string, opts?: { preserveFocus?: boolean }): boolean {
         try {
             const panel = blocklyPanelForDocument.get(docUri);
             if (panel) {
-                panel.reveal(panel.viewColumn, true);
+                const preserveFocus = opts?.preserveFocus ?? true;
+                panel.reveal(panel.viewColumn, preserveFocus);
+                return true;
             }
         } catch { /* ignore */ }
+        return false;
     }
     return { clearHighlight, highlightForLine, disposePanelsForFilePath, revealPanelForDocUri, disposeAllPanels };
 }

@@ -132,6 +132,18 @@ function resolveBlocklyTheme(): string {
     } catch { return 'dark'; }
 }
 
+function getBlocklyKidsMode(): boolean {
+    try {
+        return vscode.workspace.getConfiguration('P5Studio').get<boolean>('blockly.kidsMode', false) === true;
+    } catch { return false; }
+}
+
+function getBlocklyEnabled(): boolean {
+    try {
+        return vscode.workspace.getConfiguration('P5Studio').get<boolean>('blockly.enableBlockly', true) !== false;
+    } catch { return true; }
+}
+
 async function setReloadWhileTyping(value: boolean): Promise<void> {
     const config = vscode.workspace.getConfiguration('P5Studio');
     await config.update('reloadWhileTyping', !!value, vscode.ConfigurationTarget.Global);
@@ -183,6 +195,8 @@ export const config = {
     },
     getBlocklyTheme,
     resolveBlocklyTheme,
+    getBlocklyKidsMode,
+    getBlocklyEnabled,
     getStrictLevel,
     getLogWarningsToOutput,
     getOscConfig,

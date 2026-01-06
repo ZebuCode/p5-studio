@@ -1,0 +1,209 @@
+{
+  "categories": [
+       {
+      "name": "p5 · Quick Start",
+      "colour": "#64B5F6",
+      "blocks": [
+        "p5_setup",
+        "p5_draw",
+        "p5_auto_createCanvas",
+        "p5_auto_background",
+        "p5_auto_line",
+        "p5_auto_circle",
+        "p5_auto_rect",
+        "p5_auto_fill",
+        "p5_auto_stroke",
+        "p5_auto_noFill",
+        "p5_auto_noStroke",
+        "p5_auto_strokeWeight",
+        "p5_auto_text"
+      ]
+    },
+     {
+      "name": "p5 · Globals & Constants",
+      "colour": "#ffd180",
+      "blocks": [
+        "p5_global_number",
+        "p5_global_boolean",
+        "p5_global_string",
+        "p5_constant"
+      ]
+    },
+    {
+      "name": "p5 · Color",
+      "colour": "#F06292",
+      "blocks": [
+        "p5_auto_background",
+        "p5_auto_fill",
+        "p5_auto_noFill",
+        "p5_auto_noStroke",
+        "p5_auto_stroke"
+      ]
+    },
+    {
+      "name": "p5 · Shape",
+      "colour": "#64B5F6",
+      "blocks": [
+        "p5_auto_arc",
+        "p5_auto_circle",
+        "p5_auto_curve",
+        "p5_auto_ellipse",
+        "p5_auto_line",
+        "p5_auto_point",
+        "p5_auto_quad",
+        "p5_auto_rect",
+        "p5_auto_square",
+        "p5_auto_strokeCap",
+        "p5_auto_strokeWeight",
+        "p5_auto_triangle"
+      ]
+    },
+    {
+      "name": "p5 · Text",
+      "colour": "#4FC3F7",
+      "blocks": [
+        "p5_auto_text",
+        "p5_auto_textAlign",
+        "p5_auto_textSize"
+      ]
+    },
+    {
+      "name": "p5 · Math",
+      "colour": "#9575CD",
+      "blocks": [
+        "p5_auto_abs",
+        "p5_auto_ceil",
+        "p5_auto_cos",
+        "p5_auto_floor",
+        "p5_auto_map",
+        "p5_auto_max",
+        "p5_auto_min",
+        "p5_auto_noise",
+        "p5_auto_random",
+        "p5_auto_round",
+        "p5_auto_sin"
+      ]
+    },
+    {
+      "name": "p5 · Input",
+      "colour": "#FF8A65",
+      "blocks": [
+         { "type": "p5_auto_keyPressed", "event": true },
+         { "type": "p5_auto_keyReleased", "event": true },
+         { "type": "p5_auto_keyTyped", "event": true },
+         { "type": "p5_auto_mouseClicked", "event": true },
+         { "type": "p5_auto_mouseDragged", "event": true },
+         { "type": "p5_auto_mouseMoved", "event": true },
+         { "type": "p5_auto_mousePressed", "event": true },
+         { "type": "p5_auto_mouseReleased", "event": true },
+        { "type": "p5_auto_doubleClicked", "event": true }
+      ]
+    },
+    
+    {
+      "name": "p5 · Core",
+      "colour": "#90CAF9",
+      "blocks": [
+        "p5_auto_createCanvas",
+        "p5_auto_cursor",
+        "p5_auto_isLooping",
+        "p5_auto_loop",
+        "p5_auto_noCursor",
+        "p5_auto_noLoop",
+        "p5_auto_pop",
+        "p5_auto_push",
+        "p5_auto_rotate",
+        "p5_auto_scale",
+        "p5_auto_shearX",
+        "p5_auto_shearY",
+        "p5_auto_translate"
+      ]
+    },
+      {
+      "name": "Logic",
+  "colour": "#5b80a5",
+      "blocks": [
+        "controls_if",
+        "logic_compare",
+        "logic_operation",
+        "logic_negate",
+        "logic_ternary"
+      ]
+    },
+    {
+      "name": "Loops",
+     "colour": "#5ba55b",
+      "blocks": [
+        "controls_repeat_ext",
+        "controls_whileUntil",
+        "controls_for",
+        "controls_forEach",
+        "controls_flow_statements"
+      ]
+    },
+    {
+      "name": "Text",
+    "colour": "#5ba58c",
+      "blocks": [
+        "text_join",
+        "text_append",
+        "text_length",
+        "text_isEmpty",
+        "text_indexOf",
+        "text_charAt",
+        "text_getSubstring",
+        "text_changeCase",
+        "text_trim",
+        "text_count",
+        "text_replace",
+        "text_reverse"
+      ]
+    },
+    {
+      "name": "Lists",
+      "colour": "#745ba5",
+      "blocks": [
+        "lists_create_with",
+        "lists_create_with",
+        "lists_repeat",
+        "lists_length",
+        "lists_isEmpty",
+        "lists_indexOf",
+        "lists_getIndex",
+        "lists_setIndex",
+        "lists_getSublist",
+        "lists_split",
+        "lists_sort",
+        "lists_reverse"
+      ]
+    },
+    {
+      "name": "Values",
+"colour": "#5ec453",
+      "blocks": [
+        "math_number",
+        "text",
+        "logic_boolean"
+      ]
+    },
+    {
+      "name": "Variables",
+     "colour": "#a55b80",
+      "custom": "VARIABLE",
+      "blocks": []
+    },
+    {
+      "name": "Functions",
+  "colour": "#995ba5",
+      "custom": "PROCEDURE",
+      "blocks": []
+    },
+    {
+      "name": "Debug",
+      "colour": "#ec43f5",
+      "blocks": [
+        "output"
+      ]
+    }
+  ]
+}

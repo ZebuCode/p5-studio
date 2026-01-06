@@ -73,6 +73,14 @@ export function registerLayoutRestore(context: vscode.ExtensionContext, deps: La
       } catch { /* ignore */ }
       _restoringPanels = true;
 
+      const blkDocs = deps.restore.getRestoreList(deps.RESTORE_BLOCKLY_KEY)
+        .filter(p => typeof p === 'string' && p)
+        .filter(p => fs.existsSync(p) && deps.isInWorkspace(p));
+      const uniqueBlk = Array.from(new Set(blkDocs));
+      for (const fsPath of uniqueBlk) {
+        try { await deps.openBlocklyForFsPath(fsPath); await new Promise(r => setTimeout(r, 150)); } catch { }
+      }
+
       const liveDocs = deps.restore.getRestoreList(deps.RESTORE_LIVE_KEY)
         .filter(p => typeof p === 'string' && p)
         .filter(p => fs.existsSync(p) && deps.isInWorkspace(p));
@@ -95,14 +103,6 @@ export function registerLayoutRestore(context: vscode.ExtensionContext, deps: La
           try { await deps.openLiveForFsPath(fsPath); await new Promise(r => setTimeout(r, 150)); } catch { }
         }
       }
-
-      const blkDocs = deps.restore.getRestoreList(deps.RESTORE_BLOCKLY_KEY)
-        .filter(p => typeof p === 'string' && p)
-        .filter(p => fs.existsSync(p) && deps.isInWorkspace(p));
-      const uniqueBlk = Array.from(new Set(blkDocs));
-      for (const fsPath of uniqueBlk) {
-        try { await deps.openBlocklyForFsPath(fsPath); await new Promise(r => setTimeout(r, 150)); } catch { }
-      }
     } catch { /* ignore */ }
     finally {
       _restoringPanels = false;
@@ -111,18 +111,8 @@ export function registerLayoutRestore(context: vscode.ExtensionContext, deps: La
 
   async function computeTargetColumnForLive(): Promise<vscode.ViewColumn> {
     if (_restoringPanels) {
-      try {
-        const col = _restoreP5TargetColumn;
-        if (typeof col === 'number') {
-          await vscode.commands.executeCommand('workbench.action.focusFirstEditorGroup');
-          let steps = Math.max(0, (col as number) - 1);
-          while (steps-- > 0) {
-            await vscode.commands.executeCommand('workbench.action.focusRightGroup');
-          }
-          return col as vscode.ViewColumn;
-        }
-      } catch { }
-      return vscode.ViewColumn.Active;
+      try { await vscode.commands.executeCommand('workbench.action.focusFirstEditorGroup'); } catch { }
+      return vscode.ViewColumn.Beside;
     }
     // Manual open: anchor to top row, create/focus right group
     let target: vscode.ViewColumn = vscode.ViewColumn.Beside;

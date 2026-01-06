@@ -58,6 +58,14 @@ const fsp = fs.promises;
 
 const webviewPanelMap = new Map<string, vscode.WebviewPanel>();
 let activeP5Panel: vscode.WebviewPanel | null = null;
+let kidsModeEnabled = cfg.getBlocklyKidsMode();
+let blocklyFeatureEnabled = cfg.getBlocklyEnabled();
+const kidsModeInFlightDocs = new Set<string>();
+const kidsModeManagedDocs = new Set<string>();
+let activeKidsModeDocUri: string | null = null;
+let suppressKidsModeAutoOpen = false;
+const suppressedPanelDisposalPaths = new Set<string>();
+const pendingKidsDocClosures = new Set<string>();
 
 // Context service for context keys and focus watchers
 let contextService: ContextServiceApi;
@@ -426,11 +434,10 @@ export function activate(context: vscode.ExtensionContext) {
       const docUri = editor.document.uri.toString();
       const text = editor.document.getText();
       const hasSetup = /\bfunction\s+setup\s*\(/.test(text);
-      const hasDraw = detectDrawFunction(text);
+      const hasDraw = /\bfunction\s+draw\s*\(/.test(text);
       const heading: 'locals' | 'variables' = (!hasSetup && !hasDraw) ? 'variables' : 'locals';
       variablesService.setLocalsHeadingForDoc(docUri, heading);
-      // Only treat sketch as having draw() if a draw function exists
-      variablesService.setHasDrawForDoc(docUri, !!hasDraw);
+      variablesService.setHasDrawForDoc(docUri, hasDraw);
       updateVariablesPanel();
     } catch { }
   };
@@ -555,6 +562,16 @@ export function activate(context: vscode.ExtensionContext) {
     removeFromRestore: restore.removeFromRestore,
     RESTORE_BLOCKLY_KEY,
     updateP5WebviewTabContext,
+    notifyKidsModeFocus: (docUri, isActive) => {
+      void updateKidsModeToolbarContext(docUri, isActive);
+    },
+    notifyPanelDisposed: (docUri) => {
+      if (!docUri) return;
+      kidsModeManagedDocs.delete(docUri);
+      if (activeKidsModeDocUri === docUri) {
+        void updateKidsModeToolbarContext(undefined, false);
+      }
+    },
   });
 
   // Linting: delegated to src/lint
@@ -620,28 +637,180 @@ export function activate(context: vscode.ExtensionContext) {
     if (isJsOrTs && hasP5Project) p5RefStatusBar.show(); else p5RefStatusBar.hide();
   }
 
-  function updateBlocklyAvailability(editor?: vscode.TextEditor) {
-    editor = editor || vscode.window.activeTextEditor;
-    let eligible = false;
+  function isBlocklyEligibleDocument(doc?: vscode.TextDocument): boolean {
+    if (!doc) return false;
     try {
-      if (editor && ['javascript', 'typescript'].includes(editor.document.languageId)) {
-        const text = editor.document.getText();
-        const isEmpty = text.trim().length === 0;
-        let hasSidecar = false;
-        let hasEmbedded = false;
-        if (!isEmpty) {
-          const sidecarPath = getBlocklySidecarPath(editor.document.fileName);
-          hasSidecar = !!(sidecarPath && fs.existsSync(sidecarPath));
-          if (!hasSidecar) {
-            hasEmbedded = /\/\*@BlocklyWorkspace[\s\S]*?\*\//.test(text);
-          }
+      if (!['javascript', 'typescript'].includes(doc.languageId)) return false;
+      const text = doc.getText();
+      const isEmpty = text.trim().length === 0;
+      let hasSidecar = false;
+      let hasEmbedded = false;
+      if (!isEmpty) {
+        const sidecarPath = getBlocklySidecarPath(doc.fileName);
+        hasSidecar = !!(sidecarPath && fs.existsSync(sidecarPath));
+        if (!hasSidecar) {
+          hasEmbedded = /\/\*@BlocklyWorkspace[\s\S]*?\*\//.test(text);
         }
-        eligible = isEmpty || hasSidecar || hasEmbedded;
+      }
+      return isEmpty || hasSidecar || hasEmbedded;
+    } catch {
+      return false;
+    }
+  }
+
+  function updateBlocklyAvailability(editor?: vscode.TextEditor) {
+    const doc = (editor || vscode.window.activeTextEditor)?.document;
+    const eligible = isBlocklyEligibleDocument(doc);
+    vscode.commands.executeCommand('setContext', 'p5BlocklyEligible', eligible);
+  }
+
+  function isKidsModeFeatureEnabled(): boolean {
+    return kidsModeEnabled && blocklyFeatureEnabled;
+  }
+
+  async function closeEditorTabForDoc(docUri: string) {
+    let normalizedPath: string | undefined;
+    try {
+      const uri = vscode.Uri.parse(docUri);
+      if (uri.scheme === 'file') {
+        normalizedPath = panelManager.normalizeFsPath(uri.fsPath);
       }
     } catch {
-      eligible = false;
+      normalizedPath = undefined;
     }
-    vscode.commands.executeCommand('setContext', 'p5BlocklyEligible', eligible);
+
+    let releasedSuppression = false;
+    const releaseSuppression = () => {
+      if (releasedSuppression || !normalizedPath) return;
+      releasedSuppression = true;
+      setTimeout(() => suppressedPanelDisposalPaths.delete(normalizedPath!), 300);
+    };
+    if (normalizedPath) {
+      suppressedPanelDisposalPaths.add(normalizedPath);
+    }
+
+    const tryCloseViaTabs = async () => {
+      if (!normalizedPath) return false;
+      try {
+        const groups: readonly vscode.TabGroup[] = (vscode.window.tabGroups as any).all || [vscode.window.tabGroups.activeTabGroup];
+        const tabsToClose: vscode.Tab[] = [];
+        for (const group of groups || []) {
+          for (const tab of group?.tabs || []) {
+            try {
+              const tabPath = panelManager.fsPathFromTab(tab);
+              if (tabPath && tabPath === normalizedPath) {
+                tabsToClose.push(tab);
+              }
+            } catch { }
+          }
+        }
+        if (!tabsToClose.length) return false;
+        await vscode.window.tabGroups.close(tabsToClose, true);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    try {
+      if (await tryCloseViaTabs()) {
+        return;
+      }
+
+      const activeUri = vscode.window.activeTextEditor?.document?.uri?.toString();
+      if (activeUri === docUri) {
+        await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+        return;
+      }
+      const targetEditor = vscode.window.visibleTextEditors.find(ed => ed.document?.uri?.toString() === docUri);
+      if (targetEditor) {
+        await vscode.window.showTextDocument(targetEditor.document, { preview: false, preserveFocus: false });
+        if (vscode.window.activeTextEditor?.document?.uri?.toString() === docUri) {
+          await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+        }
+      }
+    } catch {
+      // Ignore failures; VS Code may reject close commands when no editor is active.
+    } finally {
+      releaseSuppression();
+    }
+  }
+
+  async function ensureEditorForDocUri(docUri: string): Promise<vscode.TextEditor | undefined> {
+    try {
+      const existing = vscode.window.visibleTextEditors.find(ed => ed.document?.uri?.toString() === docUri);
+      if (existing) {
+        return existing;
+      }
+      const uri = vscode.Uri.parse(docUri);
+      const doc = await vscode.workspace.openTextDocument(uri);
+      return vscode.window.showTextDocument(doc, {
+        preview: false,
+        preserveFocus: true,
+        viewColumn: vscode.ViewColumn.One,
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function openDocumentSilently(docUri: string): Promise<vscode.TextDocument | undefined> {
+    try {
+      const existing = vscode.workspace.textDocuments.find(doc => doc.uri.toString() === docUri && !doc.isClosed);
+      if (existing) {
+        return existing;
+      }
+      const uri = vscode.Uri.parse(docUri);
+      return vscode.workspace.openTextDocument(uri);
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function updateKidsModeToolbarContext(docUri: string | undefined, isActive: boolean) {
+    const shouldActivate = !!docUri && isActive && isKidsModeFeatureEnabled() && kidsModeManagedDocs.has(docUri);
+    if (shouldActivate) {
+      activeKidsModeDocUri = docUri;
+      await vscode.commands.executeCommand('setContext', 'p5BlocklyKidsModeActive', true);
+      const hasPanel = webviewPanelMap.has(docUri);
+      await vscode.commands.executeCommand('setContext', 'hasP5Webview', hasPanel);
+      return;
+    }
+    if (!activeKidsModeDocUri) {
+      return;
+    }
+    if (docUri && docUri !== activeKidsModeDocUri) {
+      return;
+    }
+    activeKidsModeDocUri = null;
+    await vscode.commands.executeCommand('setContext', 'p5BlocklyKidsModeActive', false);
+    if (!vscode.window.activeTextEditor) {
+      await vscode.commands.executeCommand('setContext', 'hasP5Webview', false);
+    }
+  }
+
+  async function maybeActivateKidsMode(editor?: vscode.TextEditor) {
+    if (!editor || !isKidsModeFeatureEnabled() || suppressKidsModeAutoOpen) return;
+    try {
+      const doc = editor.document;
+      if (doc.isUntitled) return;
+      if (doc.uri.scheme !== 'file') return;
+      if (!doc.fileName.toLowerCase().endsWith('.js')) return;
+      if (!isBlocklyEligibleDocument(doc)) return;
+      const docUri = doc.uri.toString();
+      if (kidsModeInFlightDocs.has(docUri)) return;
+      kidsModeManagedDocs.add(docUri);
+      kidsModeInFlightDocs.add(docUri);
+      try {
+        await vscode.commands.executeCommand('extension.open-blockly');
+        try { blocklyApi?.revealPanelForDocUri?.(docUri, { preserveFocus: false }); } catch { }
+        await closeEditorTabForDoc(docUri);
+      } finally {
+        kidsModeInFlightDocs.delete(docUri);
+      }
+    } catch {
+      // Ignore kids mode automation failures to avoid disrupting editing.
+    }
   }
 
   updateP5Context();
@@ -742,20 +911,55 @@ export function activate(context: vscode.ExtensionContext) {
     openLiveForFsPath: async (fsPath: string) => {
       if (!fs.existsSync(fsPath)) return;
       const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fsPath));
-      await vscode.window.showTextDocument(doc, { preview: false, preserveFocus: false, viewColumn: vscode.ViewColumn.One });
-      await vscode.commands.executeCommand('extension.live-p5');
+      const docUri = doc.uri.toString();
+      const previousSuppress = suppressKidsModeAutoOpen;
+      suppressKidsModeAutoOpen = true;
+      try {
+        await vscode.window.showTextDocument(doc, { preview: false, preserveFocus: false, viewColumn: vscode.ViewColumn.One });
+        await vscode.commands.executeCommand('extension.live-p5');
+      } finally {
+        suppressKidsModeAutoOpen = previousSuppress;
+      }
+      if (isKidsModeFeatureEnabled()) {
+        pendingKidsDocClosures.delete(docUri);
+        try { await closeEditorTabForDoc(docUri); } catch { }
+      }
     },
     openBlocklyForFsPath: async (fsPath: string) => {
       if (!fs.existsSync(fsPath)) return;
       const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fsPath));
-      await vscode.window.showTextDocument(doc, { preview: false, preserveFocus: false, viewColumn: vscode.ViewColumn.One });
-      await vscode.commands.executeCommand('extension.open-blockly');
+      const docUri = doc.uri.toString();
+      const previousSuppress = suppressKidsModeAutoOpen;
+      suppressKidsModeAutoOpen = true;
+      try {
+        await vscode.window.showTextDocument(doc, { preview: false, preserveFocus: false, viewColumn: vscode.ViewColumn.One });
+        await vscode.commands.executeCommand('extension.open-blockly');
+      } finally {
+        suppressKidsModeAutoOpen = previousSuppress;
+      }
+      if (isKidsModeFeatureEnabled()) {
+        pendingKidsDocClosures.add(docUri);
+      } else {
+        try { await closeEditorTabForDoc(docUri); } catch { }
+      }
     },
   });
   // Kick off restore asynchronously
-  (async () => { try { await layoutService.beginRestore(); } catch { } })();
+  (async () => {
+    try { await layoutService.beginRestore(); } catch { }
+    finally {
+      if (pendingKidsDocClosures.size) {
+        const pending = Array.from(pendingKidsDocClosures);
+        pendingKidsDocClosures.clear();
+        for (const docUri of pending) {
+          try { await closeEditorTabForDoc(docUri); } catch { }
+        }
+      }
+    }
+  })();
 
   let _lastStepHighlightEditor: vscode.TextEditor | undefined;
+  let _kidsModeTemporarilyDisabled = false;
   vscode.window.onDidChangeActiveTextEditor(async (editor) => {
     // --- Update context keys for active document only ---
     let steppingActive = false;
@@ -793,8 +997,13 @@ export function activate(context: vscode.ExtensionContext) {
     }
     updateP5Context(editor);
     updateJsOrTsContext(editor);
-    updateBlocklyAvailability(editor);
+    if (!editor || !_kidsModeTemporarilyDisabled) {
+      updateBlocklyAvailability(editor);
+    }
     if (!editor) return;
+    if (_kidsModeTemporarilyDisabled) {
+      _kidsModeTemporarilyDisabled = false;
+    }
     syncTriggersForEditor(editor);
     const docUri = editor.document.uri.toString();
     // Restore focus for P5 panel and set hasP5Webview context per sketch
@@ -823,6 +1032,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Ensure active editor is anchored in the top-left group
     try { await layoutService.ensureEditorInLeftColumn(editor); } catch { }
     if (editor && autoReload) autoReload.setupAutoReloadForDoc(editor);
+    await maybeActivateKidsMode(editor);
     // Track the last editor for highlight clearing
     _lastStepHighlightEditor = editor;
     // Focus the output channel for the active sketch
@@ -873,18 +1083,28 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.workspace.onDidCloseTextDocument(async doc => {
       lintApi.clearDiagnosticsForDocument(doc.uri);
+      const normalizedClosedPath = (() => {
+        try {
+          return doc.uri.scheme === 'file' ? panelManager.normalizeFsPath(doc.fileName) : undefined;
+        } catch {
+          return undefined;
+        }
+      })();
+      const skipPanelDisposal = normalizedClosedPath ? suppressedPanelDisposalPaths.has(normalizedClosedPath) : false;
       // Blockly panels are managed by the blockly module
       // Also close the corresponding P5 panel for this document, if present
-      try {
-        const p5Panel = webviewPanelMap.get(doc.uri.toString());
-        if (p5Panel) {
-          p5Panel.dispose();
-        }
-      } catch { /* ignore */ }
-      // Dispose per-doc output channel as well
-      try { disposeOutputForDoc(doc.uri.toString()); } catch { }
-      // Deterministic cleanup: close all P5/Blockly panels bound to this exact file path
-      try { panelManager.disposePanelsForFilePath(doc.fileName); } catch { /* ignore */ }
+      if (!skipPanelDisposal) {
+        try {
+          const p5Panel = webviewPanelMap.get(doc.uri.toString());
+          if (p5Panel) {
+            p5Panel.dispose();
+          }
+        } catch { /* ignore */ }
+        // Dispose per-doc output channel as well
+        try { disposeOutputForDoc(doc.uri.toString()); } catch { }
+        // Deterministic cleanup: close all P5/Blockly panels bound to this exact file path
+        try { panelManager.disposePanelsForFilePath(doc.fileName); } catch { /* ignore */ }
+      }
     })
   );
 
@@ -914,6 +1134,9 @@ export function activate(context: vscode.ExtensionContext) {
       };
       for (const p of candidates) {
         if (!anyTabFor(p)) {
+          if (suppressedPanelDisposalPaths.has(p)) {
+            continue;
+          }
           // No more editor tabs for this file: dispose panels
           panelManager.disposePanelsForFilePath(p);
           // Also dispose the associated output channel for this file
@@ -1093,601 +1316,630 @@ export function activate(context: vscode.ExtensionContext) {
       if (!hasP5Project) {
         return;
       }
-      const editor = vscode.window.activeTextEditor;
-      if (!editor) return;
-      const docUri = editor.document.uri.toString();
-      let panel = webviewPanelMap.get(docUri);
-      let code = editor.document.getText();
-
-      // --- NEW: SingleP5Panel logic ---
-      if (isSingleP5PanelEnabled()) {
-        // Close all other panels before opening a new one
-        for (const [uri, p] of webviewPanelMap.entries()) {
-          if (uri !== docUri) {
-            p.dispose();
-            // The panel.onDidDispose will remove from map
+      const kidsDocCandidate = (isKidsModeFeatureEnabled() && activeKidsModeDocUri && kidsModeManagedDocs.has(activeKidsModeDocUri)) ? activeKidsModeDocUri : undefined;
+      let editor = vscode.window.activeTextEditor;
+      let usedKidsModeFallback = false;
+      let cleanupDocUri: string | undefined;
+      try {
+        if (!editor || (kidsDocCandidate && editor.document.uri.toString() !== kidsDocCandidate)) {
+          if (kidsDocCandidate) {
+            const doc = await openDocumentSilently(kidsDocCandidate);
+            if (!doc) return;
+            editor = await vscode.window.showTextDocument(doc, { preview: false, preserveFocus: true, viewColumn: vscode.ViewColumn.Two });
+            usedKidsModeFallback = true;
+            cleanupDocUri = kidsDocCandidate;
           }
         }
-      }
+        if (!editor) return;
+        const docUri = editor.document.uri.toString();
+        cleanupDocUri = cleanupDocUri || docUri;
+        let panel = webviewPanelMap.get(docUri);
+        let code = editor.document.getText();
 
-      if (!panel) {
-        // Check for syntax errors before setting HTML
-
-        const prep = await prepareSketch({
-          document: editor.document,
-          reason: 'open',
-          lint: {
-            hasSemicolonWarnings: d => lintApi.hasSemicolonWarnings(d),
-            hasUndeclaredWarnings: d => lintApi.hasUndeclaredWarnings(d),
-            hasVarWarnings: d => lintApi.hasVarWarnings(d),
-            hasEqualityWarnings: d => lintApi.hasEqualityWarnings(d),
-            getStrictLevel: k => lintApi.getStrictLevel(k),
-          },
-          allowInteractiveTopInputs: _allowInteractiveTopInputs,
-        });
-
-        try {
-          const sliderDefs = prep?.globals?.variables
-            ? prep.globals.variables.map(g => ({ name: g.name, control: g.control }))
-            : [];
-          variablesService.setGlobalHintsForDoc(docUri, sliderDefs);
-        } catch { }
-
-        let syntaxErrorMsg: string | null = prep.syntaxErrorMsg || null;
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-        if (!workspaceFolder) return;
-        const { localResourceRoots, selectedVersion } = resolveLiveAssets(context, editor);
-        // Ensure the originating editor has focus so the new group we create is
-        // positioned relative to it.
-        const originalColumn = typeof editor.viewColumn === 'number' ? (editor.viewColumn as number) : undefined;
-        try {
-          await vscode.window.showTextDocument(editor.document, editor.viewColumn || vscode.ViewColumn.One, false);
-        } catch (e) { /* ignore */ }
-
-        const targetColumn: vscode.ViewColumn = await layoutService.computeTargetColumnForLive();
-
-        panel = panelManager.createPanel(editor, {
-          title: livePanelTitleForFile(editor.document.fileName),
-          column: targetColumn,
-          localResourceRoots,
-        });
-        syncLocalsHeadingForEditor(editor);
-        syncTriggersForEditor(editor);
-        try { (panel as any)._p5Version = selectedVersion; } catch { }
-
-        // Focus the output channel for the new sketch immediately
-        const fileName = path.basename(editor.document.fileName);
-        const outputChannel = getOrCreateOutputChannel(docUri, fileName);
-        showAndTrackOutputChannel(outputChannel); // <--- replaced direct show
-        // --- LOG ACTIVE p5.js VERSION + WARNINGS via resolver ---
-        try { resolveLiveAssets(context, editor, { output: outputChannel, getTime }); } catch { }
-
-        contextService.setCaptureVisible(docUri, false);
-        try {
-          const drawPresent = detectDrawFunction(editor.document.getText());
-          contextService.setHasDraw(docUri, drawPresent);
-          contextService.setDrawLoopPaused(docUri, false);
-        } catch { }
-        try {
-          await restore.addToRestore(RESTORE_LIVE_KEY, editor.document.fileName);
-          await restore.moveToOrderEnd(editor.document.fileName);
-        } catch { }
-        activeP5Panel = panel;
-        try {
-          panel.onDidChangeViewState(() => {
-            try {
-              if (panel.active) {
-                activeP5Panel = panel;
-                // Keep Variables panel in sync with the newly active webview tab
-                updateVariablesPanel();
-                // Keep TRIGGERS panel in sync with the newly active webview tab
-                updateTriggersPanel();
-              }
-            } catch { }
-          });
-        } catch { }
-        vscode.commands.executeCommand('setContext', 'hasP5Webview', true);
-        // Initialize primed state for this sketch
-        contextService.setDebugPrimed(docUri, false);
-        panel.onDidDispose(() => {
-          try { contextService.setSteppingActive(docUri, false); } catch { }
-          contextService.clearForDoc(docUri);
-          try { variablesService.clearForDoc(docUri); } catch { }
-          try { triggersService.clearForDoc(docUri); } catch { }
-          try { disposeOutputForDoc(docUri); } catch { }
-          if (activeP5Panel === panel) {
-            vscode.commands.executeCommand('setContext', 'p5DebugPrimed', false);
-            vscode.commands.executeCommand('setContext', 'p5CaptureVisible', false);
-            vscode.commands.executeCommand('setContext', 'p5SteppingActive', false);
-            // If the disposed panel was active, refresh Variables panel to reflect no active sketch
-            updateVariablesPanel();
-            // If the disposed panel was active, refresh TRIGGERS panel to reflect no active sketch
-            updateTriggersPanel();
-          }
-        });
-
-        ; (require('./webview/router') as any).registerWebviewRouter(panel, async (msg: WebviewToExtensionMessage) => {
-          if (msg.type === 'setGlobalVars') {
-            handleSetGlobalVars({ panel, editor, variables: msg.variables, generatedAt: msg.generatedAt }, {
-              setGlobalsForDoc: (docUri, list, opts) => variablesService.setGlobalsForDoc(docUri, list, opts),
-              updateVariablesPanel,
-              isActivePanel: (p) => activeP5Panel === p,
-            });
-            return;
-          } else if (msg.type === 'revealGlobals') {
-            try {
-              const docUriStr = editor.document.uri.toString();
-              variablesService.revealGlobalsForDoc(docUriStr, typeof msg.count === 'number' ? msg.count : undefined);
-            } catch { }
-            updateVariablesPanel();
-            return;
-          } else if (msg.type === 'updateGlobalVar') {
-            handleUpdateGlobalVar({ panel, editor, name: msg.name, value: msg.value, generatedAt: msg.generatedAt }, {
-              getGlobalsForDoc: (docUri) => variablesService.getGlobalsForDoc(docUri),
-              getLocalsForDoc: (docUri) => variablesService.getLocalsForDoc(docUri),
-              setGlobalValue: (docUri, name, value, opts) => variablesService.setGlobalValue(docUri, name, value, opts),
-              hasGlobalDefinition: (docUri, name) => variablesService.hasGlobalDefinition(docUri, name),
-              upsertLocal: (docUri, v) => variablesService.upsertLocalForDoc(docUri, v),
-              updateVariablesPanel,
-              isActivePanel: (p) => activeP5Panel === p,
-            });
-            return;
-          }
-          // Focus the script tab if requested from the webview
-          if (msg.type === 'focus-script-tab') {
-            handleFocusScriptTab();
-            return;
-          }
-          if (msg.type === 'openLoopGuardSettings') {
-            try {
-              await vscode.commands.executeCommand('workbench.action.openSettings', 'P5Studio.loopGuard');
-            } catch {
-              await vscode.commands.executeCommand('workbench.action.openSettings');
+        // --- NEW: SingleP5Panel logic ---
+        if (isSingleP5PanelEnabled()) {
+          // Close all other panels before opening a new one
+          for (const [uri, p] of webviewPanelMap.entries()) {
+            if (uri !== docUri) {
+              p.dispose();
+              // The panel.onDidDispose will remove from map
             }
-            return;
           }
-          if (msg.type === 'captureVisibilityChanged') {
-            handleCaptureVisibilityChanged({ panel, editor, visible: !!msg.visible }, {
-              setCaptureVisible: (docUri, vis) => contextService.setCaptureVisible(docUri, vis),
-              setContext: (k, v) => contextService.setContext(k, v),
-              isActivePanel: (p) => activeP5Panel === p,
-            });
-            return;
-          }
-          const fileName = path.basename(editor.document.fileName);
-          const docUri = editor.document.uri.toString();
-          // Capture the currently active output channel *before* getOrCreateOutputChannel updates the tracker.
-          const lastActiveOutputName = getLastActiveOutputChannel()?.name;
-          const outputChannel = getOrCreateOutputChannel(docUri, fileName);
-          if (msg.type === 'log') {
-            handleLog({ message: msg.message, focus: !!msg.focus }, {
-              canLog: () => !ignoreLogs,
-              outputChannel,
-              getTime,
-              focusOutputChannel: () => {
-                // OSC server start intentionally shows the OSC output channel; on the next sketch log,
-                // switch back to the sketch output channel.
-                if (lastActiveOutputName === 'P5 STUDIO: OSC') {
-                  showAndTrackOutputChannel(outputChannel);
-                }
-              },
-            });
-          } else if (msg.type === 'loopGuardHit') {
-            try {
-              const loopCfg = vscode.workspace.getConfiguration('P5Studio');
-              const enabled = loopCfg.get<boolean>('loopGuard.enabled', true) !== false;
-              const maxIterations = loopCfg.get<number>('loopGuard.maxIterations', 10000);
-              const maxTimeMs = loopCfg.get<number>('loopGuard.maxTimeMs', 500);
+        }
 
-              const settingsLine = `maxIterations=${maxIterations}, maxTimeMs=${maxTimeMs}`;
-              const toast = 'Infinite loop detected, sketch was terminated.\n\r' + settingsLine + '\n\rVS Code can be unresponsive for a few seconds.';
-              const action = await vscode.window.showWarningMessage(toast, 'Edit loop guard settings');
-              if (action === 'Edit loop guard settings') {
-                try {
-                  await vscode.commands.executeCommand('workbench.action.openSettings', 'P5Studio.loopGuard');
-                } catch {
-                  await vscode.commands.executeCommand('workbench.action.openSettings');
+        if (!panel) {
+          // Check for syntax errors before setting HTML
+
+          const prep = await prepareSketch({
+            document: editor.document,
+            reason: 'open',
+            lint: {
+              hasSemicolonWarnings: d => lintApi.hasSemicolonWarnings(d),
+              hasUndeclaredWarnings: d => lintApi.hasUndeclaredWarnings(d),
+              hasVarWarnings: d => lintApi.hasVarWarnings(d),
+              hasEqualityWarnings: d => lintApi.hasEqualityWarnings(d),
+              getStrictLevel: k => lintApi.getStrictLevel(k),
+            },
+            allowInteractiveTopInputs: _allowInteractiveTopInputs,
+          });
+
+          try {
+            const sliderDefs = prep?.globals?.variables
+              ? prep.globals.variables.map(g => ({ name: g.name, control: g.control }))
+              : [];
+            variablesService.setGlobalHintsForDoc(docUri, sliderDefs);
+          } catch { }
+
+          let syntaxErrorMsg: string | null = prep.syntaxErrorMsg || null;
+          const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+          if (!workspaceFolder) return;
+          const { localResourceRoots, selectedVersion } = resolveLiveAssets(context, editor);
+          // Ensure the originating editor has focus so the new group we create is
+          // positioned relative to it.
+          const originalColumn = typeof editor.viewColumn === 'number' ? (editor.viewColumn as number) : undefined;
+          const previousSuppressState = suppressKidsModeAutoOpen;
+          suppressKidsModeAutoOpen = true;
+          const previousTempDisable = _kidsModeTemporarilyDisabled;
+          _kidsModeTemporarilyDisabled = true;
+          const docToUse = editor.document;
+          try {
+            // Prepare document without forcing it visible; rely on silent document reference.
+            await vscode.workspace.openTextDocument(docToUse.uri);
+          } catch { /* ignore */ }
+          finally {
+            suppressKidsModeAutoOpen = previousSuppressState;
+            _kidsModeTemporarilyDisabled = previousTempDisable;
+          }
+
+          const targetColumn: vscode.ViewColumn = await layoutService.computeTargetColumnForLive();
+
+          panel = panelManager.createPanel(editor, {
+            title: livePanelTitleForFile(editor.document.fileName),
+            column: targetColumn,
+            localResourceRoots,
+          });
+          syncLocalsHeadingForEditor(editor);
+          syncTriggersForEditor(editor);
+          try { (panel as any)._p5Version = selectedVersion; } catch { }
+
+          // Focus the output channel for the new sketch immediately
+          const fileName = path.basename(editor.document.fileName);
+          const outputChannel = getOrCreateOutputChannel(docUri, fileName);
+          showAndTrackOutputChannel(outputChannel); // <--- replaced direct show
+          // --- LOG ACTIVE p5.js VERSION + WARNINGS via resolver ---
+          try { resolveLiveAssets(context, editor, { output: outputChannel, getTime }); } catch { }
+
+          contextService.setCaptureVisible(docUri, false);
+          try {
+            const drawPresent = detectDrawFunction(editor.document.getText());
+            contextService.setHasDraw(docUri, drawPresent);
+            contextService.setDrawLoopPaused(docUri, false);
+          } catch { }
+          try {
+            await restore.addToRestore(RESTORE_LIVE_KEY, editor.document.fileName);
+            await restore.moveToOrderEnd(editor.document.fileName);
+          } catch { }
+          activeP5Panel = panel;
+          try {
+            panel.onDidChangeViewState(() => {
+              try {
+                if (panel.active) {
+                  activeP5Panel = panel;
+                  // Keep Variables panel in sync with the newly active webview tab
+                  updateVariablesPanel();
+                  // Keep TRIGGERS panel in sync with the newly active webview tab
+                  updateTriggersPanel();
                 }
-              }
-            } catch { }
-          } else if (msg.type === 'showError') {
-            handleShowError({ panel, editor, message: msg.message }, {
-              getTime,
-              formatSyntaxErrorMsg,
-              outputChannel,
+              } catch { }
             });
-          } else if (msg.type === 'submitTopInputs') {
-            syncLocalsHeadingForEditor(editor);
-            syncTriggersForEditor(editor);
-            await handleSubmitTopInputs({ panel, editor, values: msg.values }, {
-              detectTopLevelInputs,
-              preprocessTopLevelInputs,
-              setCachedInputsForKey,
-              wrapInSetupIfNeeded,
-              extractGlobalVariables,
-              extractGlobalVariablesWithConflicts,
-              rewriteUserCodeWithWindowGlobals,
-              createHtml: (code: string, p: vscode.WebviewPanel, extPath: string, opts?: any) => createHtml(code, p, extPath, { ...(opts || {}), p5Version: (p as any)._p5Version }),
-              getInitialCaptureVisible: (p) => getInitialCaptureVisible(p),
-              getExtensionPath: () => context.extensionPath,
-              getHiddenGlobalsByDirective,
-              hasOnlySetup,
-              getAllowInteractiveTopInputs: () => _allowInteractiveTopInputs,
-              setAllowInteractiveTopInputs: (v: boolean) => { _allowInteractiveTopInputs = v; },
-            });
-          } else if (msg.type === 'context-menu-refresh') {
-            await performPanelReload(panel, { preserveGlobals: false, resetVariablesPanelToCodeInitials: true });
-            return;
-          } else if (msg.type === 'context-menu-toggle-pause') {
-            const docUri = editor.document.uri.toString();
-            const hasDraw = contextService?.getHasDraw?.(docUri);
-            if (!hasDraw) {
+          } catch { }
+          vscode.commands.executeCommand('setContext', 'hasP5Webview', true);
+          // Initialize primed state for this sketch
+          contextService.setDebugPrimed(docUri, false);
+          panel.onDidDispose(() => {
+            try { contextService.setSteppingActive(docUri, false); } catch { }
+            contextService.clearForDoc(docUri);
+            try { variablesService.clearForDoc(docUri); } catch { }
+            try { triggersService.clearForDoc(docUri); } catch { }
+            try { disposeOutputForDoc(docUri); } catch { }
+            if (activeP5Panel === panel) {
+              vscode.commands.executeCommand('setContext', 'p5DebugPrimed', false);
+              vscode.commands.executeCommand('setContext', 'p5CaptureVisible', false);
+              vscode.commands.executeCommand('setContext', 'p5SteppingActive', false);
+              // If the disposed panel was active, refresh Variables panel to reflect no active sketch
+              updateVariablesPanel();
+              // If the disposed panel was active, refresh TRIGGERS panel to reflect no active sketch
+              updateTriggersPanel();
+            }
+          });
+
+          ; (require('./webview/router') as any).registerWebviewRouter(panel, async (msg: WebviewToExtensionMessage) => {
+            if (msg.type === 'setGlobalVars') {
+              handleSetGlobalVars({ panel, editor, variables: msg.variables, generatedAt: msg.generatedAt }, {
+                setGlobalsForDoc: (docUri, list, opts) => variablesService.setGlobalsForDoc(docUri, list, opts),
+                updateVariablesPanel,
+                isActivePanel: (p) => activeP5Panel === p,
+              });
+              return;
+            } else if (msg.type === 'revealGlobals') {
+              try {
+                const docUriStr = editor.document.uri.toString();
+                variablesService.revealGlobalsForDoc(docUriStr, typeof msg.count === 'number' ? msg.count : undefined);
+              } catch { }
+              updateVariablesPanel();
+              return;
+            } else if (msg.type === 'updateGlobalVar') {
+              handleUpdateGlobalVar({ panel, editor, name: msg.name, value: msg.value, generatedAt: msg.generatedAt }, {
+                getGlobalsForDoc: (docUri) => variablesService.getGlobalsForDoc(docUri),
+                getLocalsForDoc: (docUri) => variablesService.getLocalsForDoc(docUri),
+                setGlobalValue: (docUri, name, value, opts) => variablesService.setGlobalValue(docUri, name, value, opts),
+                hasGlobalDefinition: (docUri, name) => variablesService.hasGlobalDefinition(docUri, name),
+                upsertLocal: (docUri, v) => variablesService.upsertLocalForDoc(docUri, v),
+                updateVariablesPanel,
+                isActivePanel: (p) => activeP5Panel === p,
+              });
               return;
             }
-            const targetPause = !!msg.pause;
-            try {
-              sendToWebview(panel, { type: targetPause ? 'pauseDrawLoop' : 'resumeDrawLoop' });
-            } catch { }
-            try { contextService?.setDrawLoopPaused(docUri, targetPause); } catch { }
-            return;
-          } else if (msg.type === 'context-menu-toggle-capture') {
-            await toggleCapture(panel);
-            return;
-          } else if (msg.type === 'context-menu-toggle-fps') {
-            const show = !!(msg as any).show;
-            try { await cfg.setShowFPS(show); } catch { }
-            try { updateShowFpsContext(show); } catch { }
-            try { sendToWebview(panel, { type: 'toggleFPS', show }); } catch { }
-            return;
-          } else if (msg.type === 'reload-button-clicked') {
-            syncLocalsHeadingForEditor(editor);
-            syncTriggersForEditor(editor);
-            await handleReloadClicked({ panel, editor, preserveGlobals: !!msg.preserveGlobals }, {
-              getTime,
-              getOrCreateOutputChannel,
-              clearStepHighlight,
-              blocklyClearHighlight: (docUri: string) => { try { blocklyApi.clearHighlight(docUri); } catch { } },
-              lintApi,
-              formatSyntaxErrorMsg,
-              stripLeadingTimestamp,
-              createHtml: (code: string, p: vscode.WebviewPanel, extPath: string, opts?: any) => createHtml(code, p, extPath, { ...(opts || {}), p5Version: (p as any)._p5Version }),
-              getInitialCaptureVisible: (p) => getInitialCaptureVisible(p),
-              getExtensionPath: () => context.extensionPath,
-              validateSource,
-              hasNonTopInputUsage,
-              detectTopLevelInputs,
-              hasCachedInputsForKey,
-              preprocessTopLevelInputs,
-              getAllowInteractiveTopInputs: () => _allowInteractiveTopInputs,
-              setAllowInteractiveTopInputs: (v: boolean) => { _allowInteractiveTopInputs = v; },
-              wrapInSetupIfNeeded,
-              extractGlobalVariablesWithConflicts,
-              extractGlobalVariables,
-              rewriteUserCodeWithWindowGlobals,
-              getHiddenGlobalsByDirective,
-              hasOnlySetup,
-              setSteppingActive: (docUri: string, active: boolean) => { try { contextService.setSteppingActive(docUri, active); } catch { } },
-              setHasDraw: (docUri: string, value: boolean) => { try { contextService.setHasDraw(docUri, value); } catch { } },
-              setDrawLoopPaused: (docUri: string, paused: boolean) => { try { contextService.setDrawLoopPaused(docUri, paused); } catch { } },
-              getDrawLoopPaused: (docUri: string) => {
-                try { return contextService.getDrawLoopPaused(docUri); } catch { return false; }
-              },
-            });
-          }
-          // --- STEP RUN HANDLER (merged with single-step instrumentation + auto-advance) ---
-          else if (msg.type === 'step-run-clicked') {
-            try { contextService.setSteppingActive(docUri, true); } catch { }
-            syncLocalsHeadingForEditor(editor);
-            syncTriggersForEditor(editor);
-            await handleStepRunClicked({ panel, editor }, {
-              getTime,
-              getOrCreateOutputChannel,
-              lintApi,
-              hasNonTopInputUsage,
-              detectTopLevelInputs,
-              hasCachedInputsForKey,
-              preprocessTopLevelInputs,
-              wrapInSetupIfNeeded,
-              rewriteFrameCountRefs,
-              instrumentSetupForSingleStep,
-              extractGlobalVariablesWithConflicts,
-              extractGlobalVariables,
-              rewriteUserCodeWithWindowGlobals,
-              getHiddenGlobalsByDirective,
-              hasOnlySetup,
-              createHtml: (code: string, p: vscode.WebviewPanel, extPath: string, opts?: any) => createHtml(code, p, extPath, { ...(opts || {}), p5Version: (p as any)._p5Version }),
-              getInitialCaptureVisible: (p) => getInitialCaptureVisible(p),
-              getExtensionPath: () => context.extensionPath,
-              getAllowInteractiveTopInputs: () => _allowInteractiveTopInputs,
-              setAllowInteractiveTopInputs: (v: boolean) => { _allowInteractiveTopInputs = v; },
-              setSteppingActive: (docUri: string, active: boolean) => { try { contextService.setSteppingActive(docUri, active); } catch { } },
-              primeGlobalsForDoc: (docUri, list) => variablesService.primeGlobalsForDoc(docUri, list),
-              updateVariablesPanel,
-              setHasDraw: (docUri: string, value: boolean) => { try { contextService.setHasDraw(docUri, value); } catch { } },
-              setDrawLoopPaused: (docUri: string, paused: boolean) => { try { contextService.setDrawLoopPaused(docUri, paused); } catch { } },
-            });
-            setTimeout(() => {
+            // Focus the script tab if requested from the webview
+            if (msg.type === 'focus-script-tab') {
+              handleFocusScriptTab();
+              return;
+            }
+            if (msg.type === 'openLoopGuardSettings') {
               try {
-                if (!(panel as any)._steppingActive) {
-                  contextService.setSteppingActive(docUri, false);
+                await vscode.commands.executeCommand('workbench.action.openSettings', 'P5Studio.loopGuard');
+              } catch {
+                await vscode.commands.executeCommand('workbench.action.openSettings');
+              }
+              return;
+            }
+            if (msg.type === 'captureVisibilityChanged') {
+              handleCaptureVisibilityChanged({ panel, editor, visible: !!msg.visible }, {
+                setCaptureVisible: (docUri, vis) => contextService.setCaptureVisible(docUri, vis),
+                setContext: (k, v) => contextService.setContext(k, v),
+                isActivePanel: (p) => activeP5Panel === p,
+              });
+              return;
+            }
+            const fileName = path.basename(editor.document.fileName);
+            const docUri = editor.document.uri.toString();
+            // Capture the currently active output channel *before* getOrCreateOutputChannel updates the tracker.
+            const lastActiveOutputName = getLastActiveOutputChannel()?.name;
+            const outputChannel = getOrCreateOutputChannel(docUri, fileName);
+            if (msg.type === 'log') {
+              handleLog({ message: msg.message, focus: !!msg.focus }, {
+                canLog: () => !ignoreLogs,
+                outputChannel,
+                getTime,
+                focusOutputChannel: () => {
+                  // OSC server start intentionally shows the OSC output channel; on the next sketch log,
+                  // switch back to the sketch output channel.
+                  if (lastActiveOutputName === 'P5 STUDIO: OSC') {
+                    showAndTrackOutputChannel(outputChannel);
+                  }
+                },
+              });
+            } else if (msg.type === 'loopGuardHit') {
+              try {
+                const loopCfg = vscode.workspace.getConfiguration('P5Studio');
+                const enabled = loopCfg.get<boolean>('loopGuard.enabled', true) !== false;
+                const maxIterations = loopCfg.get<number>('loopGuard.maxIterations', 10000);
+                const maxTimeMs = loopCfg.get<number>('loopGuard.maxTimeMs', 500);
+
+                const settingsLine = `maxIterations=${maxIterations}, maxTimeMs=${maxTimeMs}`;
+                const toast = 'Infinite loop detected, sketch was terminated.\n\r' + settingsLine + '\n\rVS Code can be unresponsive for a few seconds.';
+                const action = await vscode.window.showWarningMessage(toast, 'Edit loop guard settings');
+                if (action === 'Edit loop guard settings') {
+                  try {
+                    await vscode.commands.executeCommand('workbench.action.openSettings', 'P5Studio.loopGuard');
+                  } catch {
+                    await vscode.commands.executeCommand('workbench.action.openSettings');
+                  }
                 }
               } catch { }
-            }, 400);
-          }
-          else if (msg.type === 'continue-clicked') {
-            try { contextService.setSteppingActive(docUri, true); } catch { }
-            await handleContinueClicked({ panel, editor }, {
-              getTime,
-              getOrCreateOutputChannel,
-              setSteppingActive: (doc, value) => { try { contextService.setSteppingActive(doc, value); } catch { } },
-            });
-            return;
-          }
-          // --- SINGLE STEP HANDLER ---
-          else if (msg.type === 'single-step-clicked') {
-            try { contextService.setSteppingActive(docUri, true); } catch { }
-            syncLocalsHeadingForEditor(editor);
-            syncTriggersForEditor(editor);
-            await handleSingleStepClicked({ panel, editor }, {
-              getTime,
-              getOrCreateOutputChannel,
-              lintApi,
-              hasNonTopInputUsage,
-              detectTopLevelInputs,
-              hasCachedInputsForKey,
-              preprocessTopLevelInputs,
-              wrapInSetupIfNeeded,
-              rewriteFrameCountRefs,
-              instrumentSetupForSingleStep,
-              extractGlobalVariablesWithConflicts,
-              extractGlobalVariables,
-              rewriteUserCodeWithWindowGlobals,
-              getHiddenGlobalsByDirective,
-              hasOnlySetup,
-              createHtml: (code: string, p: vscode.WebviewPanel, extPath: string, opts?: any) => createHtml(code, p, extPath, { ...(opts || {}), p5Version: (p as any)._p5Version }),
-              getInitialCaptureVisible: (p) => getInitialCaptureVisible(p),
-              getExtensionPath: () => context.extensionPath,
-              setSteppingActive: (docUri: string, active: boolean) => { try { contextService.setSteppingActive(docUri, active); } catch { } },
-              primeGlobalsForDoc: (docUri, list) => variablesService.primeGlobalsForDoc(docUri, list),
-              updateVariablesPanel,
-              setHasDraw: (docUri: string, value: boolean) => { try { contextService.setHasDraw(docUri, value); } catch { } },
-              setDrawLoopPaused: (docUri: string, paused: boolean) => { try { contextService.setDrawLoopPaused(docUri, paused); } catch { } },
-            });
-            setTimeout(() => {
+            } else if (msg.type === 'showError') {
+              handleShowError({ panel, editor, message: msg.message }, {
+                getTime,
+                formatSyntaxErrorMsg,
+                outputChannel,
+              });
+            } else if (msg.type === 'submitTopInputs') {
+              syncLocalsHeadingForEditor(editor);
+              syncTriggersForEditor(editor);
+              await handleSubmitTopInputs({ panel, editor, values: msg.values }, {
+                detectTopLevelInputs,
+                preprocessTopLevelInputs,
+                setCachedInputsForKey,
+                wrapInSetupIfNeeded,
+                extractGlobalVariables,
+                extractGlobalVariablesWithConflicts,
+                rewriteUserCodeWithWindowGlobals,
+                createHtml: (code: string, p: vscode.WebviewPanel, extPath: string, opts?: any) => createHtml(code, p, extPath, { ...(opts || {}), p5Version: (p as any)._p5Version }),
+                getInitialCaptureVisible: (p) => getInitialCaptureVisible(p),
+                getExtensionPath: () => context.extensionPath,
+                getHiddenGlobalsByDirective,
+                hasOnlySetup,
+                getAllowInteractiveTopInputs: () => _allowInteractiveTopInputs,
+                setAllowInteractiveTopInputs: (v: boolean) => { _allowInteractiveTopInputs = v; },
+              });
+            } else if (msg.type === 'context-menu-refresh') {
+              await performPanelReload(panel, { preserveGlobals: false, resetVariablesPanelToCodeInitials: true });
+              return;
+            } else if (msg.type === 'context-menu-toggle-pause') {
+              const docUri = editor.document.uri.toString();
+              const hasDraw = contextService?.getHasDraw?.(docUri);
+              if (!hasDraw) {
+                return;
+              }
+              const targetPause = !!msg.pause;
               try {
-                if (!(panel as any)._steppingActive) {
-                  contextService.setSteppingActive(docUri, false);
-                }
+                sendToWebview(panel, { type: targetPause ? 'pauseDrawLoop' : 'resumeDrawLoop' });
               } catch { }
-            }, 400);
-          }
-          else if (msg.type === 'startOSC') {
-            // Start OSC server, use args if provided (all four override params)
-            await startOscServer(
-              msg.localAddress,
-              msg.localPort,
-              msg.remoteAddress,
-              msg.remotePort
-            );
-            return;
-          } else if (msg.type === 'stopOSC') {
-            await stopOscServer();
-            return;
-          }
-          // --- HIGHLIGHT CURRENT LINE HANDLER ---
-          else if (msg.type === 'highlightLine') {
-            await handleHighlightLine({ panel, editor, line: msg.line }, {
-              getTime,
-              getOrCreateOutputChannel,
-              applyStepHighlight,
-              hasBreakpointOnLine: (docUriStr, line1) => hasBreakpointOnLine(docUriStr, line1),
-              blocklyHighlightForLine: (docUri: string, line: number) => { try { blocklyApi.highlightForLine(docUri, line); } catch { } },
-            });
-          }
-          // --- CLEAR HIGHLIGHT HANDLER ---
-          else if (msg.type === 'clearHighlight') {
-            await handleClearHighlight({ panel, editor, final: msg.final }, {
-              clearStepHighlight,
-              blocklyClearHighlight: (docUri: string) => { try { blocklyApi.clearHighlight(docUri); } catch { } },
-              getTime,
-              getOrCreateOutputChannel,
-              setDebugPrimedFalse: (docUri: string) => { try { contextService.setDebugPrimed(docUri, false); } catch { } },
-              setPrimedContextFalse: () => contextService.setContext('p5DebugPrimed', false),
-              setSteppingActive: (docUri: string, active: boolean) => { try { contextService.setSteppingActive(docUri, active); } catch { } },
-            });
-          }
-          // --- OSC SEND HANDLER ---
-          else if (msg.type === 'oscSend') {
-            handleOscSend({ address: msg.address, args: msg.args }, { oscService });
-            return;
-          }
-          // --- SAVE CANVAS IMAGE HANDLER ---
-          else if (msg.type === 'saveCanvasImage') {
-            await handleSaveCanvasImage({ dataUrl: msg.dataUrl, fileName: msg.fileName }, {
-              getDefaultFolder: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
-            });
-          }
-          // --- COPY CANVAS IMAGE HANDLER (fallback when webview clipboard is unavailable) ---
-          else if (msg.type === 'copyCanvasImage') {
-            handleCopyCanvasImage(msg.dataUrl);
-          }
-          // --- SHOW INFO MESSAGE FROM WEBVIEW ---
-          else if (msg.type === 'showInfo' && typeof msg.message === 'string') {
-            handleShowInfo(msg);
-          }
-        });
+              try { contextService?.setDrawLoopPaused(docUri, targetPause); } catch { }
+              return;
+            } else if (msg.type === 'context-menu-toggle-capture') {
+              await toggleCapture(panel);
+              return;
+            } else if (msg.type === 'context-menu-toggle-fps') {
+              const show = !!(msg as any).show;
+              try { await cfg.setShowFPS(show); } catch { }
+              try { updateShowFpsContext(show); } catch { }
+              try { sendToWebview(panel, { type: 'toggleFPS', show }); } catch { }
+              return;
+            } else if (msg.type === 'reload-button-clicked') {
+              syncLocalsHeadingForEditor(editor);
+              syncTriggersForEditor(editor);
+              await handleReloadClicked({ panel, editor, preserveGlobals: !!msg.preserveGlobals }, {
+                getTime,
+                getOrCreateOutputChannel,
+                clearStepHighlight,
+                blocklyClearHighlight: (docUri: string) => { try { blocklyApi.clearHighlight(docUri); } catch { } },
+                lintApi,
+                formatSyntaxErrorMsg,
+                stripLeadingTimestamp,
+                createHtml: (code: string, p: vscode.WebviewPanel, extPath: string, opts?: any) => createHtml(code, p, extPath, { ...(opts || {}), p5Version: (p as any)._p5Version }),
+                getInitialCaptureVisible: (p) => getInitialCaptureVisible(p),
+                getExtensionPath: () => context.extensionPath,
+                validateSource,
+                hasNonTopInputUsage,
+                detectTopLevelInputs,
+                hasCachedInputsForKey,
+                preprocessTopLevelInputs,
+                getAllowInteractiveTopInputs: () => _allowInteractiveTopInputs,
+                setAllowInteractiveTopInputs: (v: boolean) => { _allowInteractiveTopInputs = v; },
+                wrapInSetupIfNeeded,
+                extractGlobalVariablesWithConflicts,
+                extractGlobalVariables,
+                rewriteUserCodeWithWindowGlobals,
+                getHiddenGlobalsByDirective,
+                hasOnlySetup,
+                setSteppingActive: (docUri: string, active: boolean) => { try { contextService.setSteppingActive(docUri, active); } catch { } },
+                setHasDraw: (docUri: string, value: boolean) => { try { contextService.setHasDraw(docUri, value); } catch { } },
+                setDrawLoopPaused: (docUri: string, paused: boolean) => { try { contextService.setDrawLoopPaused(docUri, paused); } catch { } },
+                getDrawLoopPaused: (docUri: string) => {
+                  try { return contextService.getDrawLoopPaused(docUri); } catch { return false; }
+                },
+              });
+            }
+            // --- STEP RUN HANDLER (merged with single-step instrumentation + auto-advance) ---
+            else if (msg.type === 'step-run-clicked') {
+              try { contextService.setSteppingActive(docUri, true); } catch { }
+              syncLocalsHeadingForEditor(editor);
+              syncTriggersForEditor(editor);
+              await handleStepRunClicked({ panel, editor }, {
+                getTime,
+                getOrCreateOutputChannel,
+                lintApi,
+                hasNonTopInputUsage,
+                detectTopLevelInputs,
+                hasCachedInputsForKey,
+                preprocessTopLevelInputs,
+                wrapInSetupIfNeeded,
+                rewriteFrameCountRefs,
+                instrumentSetupForSingleStep,
+                extractGlobalVariablesWithConflicts,
+                extractGlobalVariables,
+                rewriteUserCodeWithWindowGlobals,
+                getHiddenGlobalsByDirective,
+                hasOnlySetup,
+                createHtml: (code: string, p: vscode.WebviewPanel, extPath: string, opts?: any) => createHtml(code, p, extPath, { ...(opts || {}), p5Version: (p as any)._p5Version }),
+                getInitialCaptureVisible: (p) => getInitialCaptureVisible(p),
+                getExtensionPath: () => context.extensionPath,
+                getAllowInteractiveTopInputs: () => _allowInteractiveTopInputs,
+                setAllowInteractiveTopInputs: (v: boolean) => { _allowInteractiveTopInputs = v; },
+                setSteppingActive: (docUri: string, active: boolean) => { try { contextService.setSteppingActive(docUri, active); } catch { } },
+                primeGlobalsForDoc: (docUri, list) => variablesService.primeGlobalsForDoc(docUri, list),
+                updateVariablesPanel,
+                setHasDraw: (docUri: string, value: boolean) => { try { contextService.setHasDraw(docUri, value); } catch { } },
+                setDrawLoopPaused: (docUri: string, paused: boolean) => { try { contextService.setDrawLoopPaused(docUri, paused); } catch { } },
+              });
+              setTimeout(() => {
+                try {
+                  if (!(panel as any)._steppingActive) {
+                    contextService.setSteppingActive(docUri, false);
+                  }
+                } catch { }
+              }, 400);
+            }
+            else if (msg.type === 'continue-clicked') {
+              try { contextService.setSteppingActive(docUri, true); } catch { }
+              await handleContinueClicked({ panel, editor }, {
+                getTime,
+                getOrCreateOutputChannel,
+                setSteppingActive: (doc, value) => { try { contextService.setSteppingActive(doc, value); } catch { } },
+              });
+              return;
+            }
+            // --- SINGLE STEP HANDLER ---
+            else if (msg.type === 'single-step-clicked') {
+              try { contextService.setSteppingActive(docUri, true); } catch { }
+              syncLocalsHeadingForEditor(editor);
+              syncTriggersForEditor(editor);
+              await handleSingleStepClicked({ panel, editor }, {
+                getTime,
+                getOrCreateOutputChannel,
+                lintApi,
+                hasNonTopInputUsage,
+                detectTopLevelInputs,
+                hasCachedInputsForKey,
+                preprocessTopLevelInputs,
+                wrapInSetupIfNeeded,
+                rewriteFrameCountRefs,
+                instrumentSetupForSingleStep,
+                extractGlobalVariablesWithConflicts,
+                extractGlobalVariables,
+                rewriteUserCodeWithWindowGlobals,
+                getHiddenGlobalsByDirective,
+                hasOnlySetup,
+                createHtml: (code: string, p: vscode.WebviewPanel, extPath: string, opts?: any) => createHtml(code, p, extPath, { ...(opts || {}), p5Version: (p as any)._p5Version }),
+                getInitialCaptureVisible: (p) => getInitialCaptureVisible(p),
+                getExtensionPath: () => context.extensionPath,
+                setSteppingActive: (docUri: string, active: boolean) => { try { contextService.setSteppingActive(docUri, active); } catch { } },
+                primeGlobalsForDoc: (docUri, list) => variablesService.primeGlobalsForDoc(docUri, list),
+                updateVariablesPanel,
+                setHasDraw: (docUri: string, value: boolean) => { try { contextService.setHasDraw(docUri, value); } catch { } },
+                setDrawLoopPaused: (docUri: string, paused: boolean) => { try { contextService.setDrawLoopPaused(docUri, paused); } catch { } },
+              });
+              setTimeout(() => {
+                try {
+                  if (!(panel as any)._steppingActive) {
+                    contextService.setSteppingActive(docUri, false);
+                  }
+                } catch { }
+              }, 400);
+            }
+            else if (msg.type === 'startOSC') {
+              // Start OSC server, use args if provided (all four override params)
+              await startOscServer(
+                msg.localAddress,
+                msg.localPort,
+                msg.remoteAddress,
+                msg.remotePort
+              );
+              return;
+            } else if (msg.type === 'stopOSC') {
+              await stopOscServer();
+              return;
+            }
+            // --- HIGHLIGHT CURRENT LINE HANDLER ---
+            else if (msg.type === 'highlightLine') {
+              await handleHighlightLine({ panel, editor, line: msg.line }, {
+                getTime,
+                getOrCreateOutputChannel,
+                applyStepHighlight,
+                hasBreakpointOnLine: (docUriStr, line1) => hasBreakpointOnLine(docUriStr, line1),
+                blocklyHighlightForLine: (docUri: string, line: number) => { try { blocklyApi.highlightForLine(docUri, line); } catch { } },
+              });
+            }
+            // --- CLEAR HIGHLIGHT HANDLER ---
+            else if (msg.type === 'clearHighlight') {
+              await handleClearHighlight({ panel, editor, final: msg.final }, {
+                clearStepHighlight,
+                blocklyClearHighlight: (docUri: string) => { try { blocklyApi.clearHighlight(docUri); } catch { } },
+                getTime,
+                getOrCreateOutputChannel,
+                setDebugPrimedFalse: (docUri: string) => { try { contextService.setDebugPrimed(docUri, false); } catch { } },
+                setPrimedContextFalse: () => contextService.setContext('p5DebugPrimed', false),
+                setSteppingActive: (docUri: string, active: boolean) => { try { contextService.setSteppingActive(docUri, active); } catch { } },
+              });
+            }
+            // --- OSC SEND HANDLER ---
+            else if (msg.type === 'oscSend') {
+              handleOscSend({ address: msg.address, args: msg.args }, { oscService });
+              return;
+            }
+            // --- SAVE CANVAS IMAGE HANDLER ---
+            else if (msg.type === 'saveCanvasImage') {
+              await handleSaveCanvasImage({ dataUrl: msg.dataUrl, fileName: msg.fileName }, {
+                getDefaultFolder: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+              });
+            }
+            // --- COPY CANVAS IMAGE HANDLER (fallback when webview clipboard is unavailable) ---
+            else if (msg.type === 'copyCanvasImage') {
+              handleCopyCanvasImage(msg.dataUrl);
+            }
+            // --- SHOW INFO MESSAGE FROM WEBVIEW ---
+            else if (msg.type === 'showInfo' && typeof msg.message === 'string') {
+              handleShowInfo(msg);
+            }
+          });
 
-        panel.onDidDispose(async () => {
-          webviewPanelMap.delete(docUri);
-          if (activeP5Panel === panel) activeP5Panel = null;
-          vscode.commands.executeCommand('setContext', 'hasP5Webview', false);
-          try { autoReload.disposeForDoc(docUri); } catch { }
-          try {
-            await restore.removeFromRestore(RESTORE_LIVE_KEY, editor.document.fileName);
-            await restore.removeFromOrder(editor.document.fileName);
-          } catch { }
-          // Clear any step highlight when panel is closed
-          try {
-            const edToClear = vscode.window.visibleTextEditors.find(e => e.document.uri.toString() === docUri);
-            if (edToClear) clearStepHighlight(edToClear);
-          } catch { }
-          // Also clear any Blockly block highlight for this document when the P5 panel closes
-          try { blocklyApi.clearHighlight(docUri); } catch { }
-          (panel as any)._steppingActive = false;
-          try { contextService.setSteppingActive(docUri, false); } catch { }
-          // Stop auto-step timer if running
-          if ((panel as any)._autoStepTimer) {
-            try { clearInterval((panel as any)._autoStepTimer); } catch { }
-            (panel as any)._autoStepTimer = null;
-          }
-          (panel as any)._autoStepMode = false;
-          // Dispose output channel when panel is closed
-          try { (require('./logging/output') as any).disposeOutputForDoc?.(docUri); } catch { }
-        });
-
-        panel.onDidChangeViewState(async e => {
-          if (e.webviewPanel.active) {
+          panel.onDidDispose(async () => {
+            webviewPanelMap.delete(docUri);
+            if (activeP5Panel === panel) activeP5Panel = null;
+            vscode.commands.executeCommand('setContext', 'hasP5Webview', false);
+            try { autoReload.disposeForDoc(docUri); } catch { }
             try {
-              const ch = (require('./logging/output') as any).getOutputChannelForDoc?.(docUri);
-              if (ch) showAndTrackOutputChannel(ch); // <--- in panel.onDidChangeViewState
+              await restore.removeFromRestore(RESTORE_LIVE_KEY, editor.document.fileName);
+              await restore.removeFromOrder(editor.document.fileName);
             } catch { }
-            // Update restore order to reflect recent activation
-            try { await restore.moveToOrderEnd(editor.document.fileName); } catch { }
-          }
-        });
-
-        if (prep.inputsOverlay && prep.inputsOverlay.length > 0) {
-          const key = editor.document.fileName;
-          let itemsToShow = prep.inputsOverlay;
-          if (hasCachedInputsForKey(key, prep.inputsOverlay)) {
-            const cached = getCachedInputsForKey(key);
-            if (cached) {
-              itemsToShow = prep.inputsOverlay.map((it, i) => ({
-                varName: it.varName,
-                label: it.label,
-                defaultValue: typeof cached.values[i] !== 'undefined' ? cached.values[i] : it.defaultValue,
-              }));
-            }
-          }
-          await setHtmlAndPost(panel, {
-            code: '',
-            extensionPath: context.extensionPath,
-            allowInteractiveTopInputs: _allowInteractiveTopInputs,
-            initialCaptureVisible: getInitialCaptureVisible(panel),
-            p5Version: (panel as any)._p5Version,
-          }, [
-            { delayMs: 150, message: { type: 'showTopInputs', items: itemsToShow } as ExtensionToWebviewMessage },
-          ], sendToWebview);
-          return;
-        }
-
-        if (prep.runtimeErrorMsg) {
-          const friendly = prep.runtimeErrorMsg;
-          await setHtmlAndPost(panel, {
-            code: '',
-            extensionPath: context.extensionPath,
-            allowInteractiveTopInputs: _allowInteractiveTopInputs,
-            initialCaptureVisible: getInitialCaptureVisible(panel),
-            p5Version: (panel as any)._p5Version,
-          }, [
-            { delayMs: 150, message: { type: 'showError', message: friendly } as ExtensionToWebviewMessage },
-          ], sendToWebview);
-          if (cfg.getLogWarningsToOutput()) {
-            outputChannel.appendLine(friendly);
-          }
-          (panel as any)._lastRuntimeError = friendly;
-          (panel as any)._lastSyntaxError = null;
-          return;
-        }
-
-        if (prep.blockOnLint) {
-          await setHtmlAndPost(panel, {
-            code: '',
-            extensionPath: context.extensionPath,
-            allowInteractiveTopInputs: _allowInteractiveTopInputs,
-            initialCaptureVisible: getInitialCaptureVisible(panel),
-            p5Version: (panel as any)._p5Version,
-          }, [], sendToWebview);
-          lintApi.logBlockingWarningsForDocument(editor.document);
-        } else {
-          await setHtmlAndPost(panel, {
-            code: prep.ok ? prep.codeToInject : '',
-            extensionPath: context.extensionPath,
-            allowInteractiveTopInputs: _allowInteractiveTopInputs,
-            initialCaptureVisible: getInitialCaptureVisible(panel),
-            p5Version: (panel as any)._p5Version,
-          }, [], sendToWebview);
-          lintApi.logSemicolonWarningsForDocument(editor.document);
-          lintApi.logUndeclaredWarningsForDocument(editor.document);
-          lintApi.logVarWarningsForDocument(editor.document);
-        }
-
-        if (prep.globals && prep.ok && !prep.blockOnLint) {
-          const varsPayload = prep.globals.variables.map(g => ({ name: g.name, type: g.type, value: undefined }));
-          setTimeout(() => {
-            sendToWebview(panel, { type: 'setGlobalVars', variables: varsPayload, readOnly: prep.globals!.readOnly });
-          }, 200);
-        }
-
-        if (syntaxErrorMsg) {
-          setTimeout(() => {
-            sendToWebview(panel, { type: 'syntaxError', message: stripLeadingTimestamp(syntaxErrorMsg) });
-          }, 150);
-          const outputChannel = getOrCreateOutputChannel(docUri, path.basename(editor.document.fileName));
-          if (cfg.getLogWarningsToOutput()) {
-            outputChannel.appendLine(syntaxErrorMsg);
-          }
-        }
-      } else {
-        try {
-          const drawPresent = detectDrawFunction(editor.document.getText());
-          contextService.setHasDraw(docUri, drawPresent);
-          contextService.setDrawLoopPaused(docUri, false);
-        } catch { }
-        panel.reveal(panel.viewColumn, true);
-        setTimeout(() => {
-          let codeToSend = editor.document.getText();
-          // --- Check for syntax/reference errors BEFORE wrapping in setup ---
-          try {
-            new Function(codeToSend);
-            codeToSend = wrapInSetupIfNeeded(codeToSend);
+            // Clear any step highlight when panel is closed
             try {
-              codeToSend = injectLoopGuards(codeToSend, { tagPrefix: path.basename(editor.document.fileName) }).code;
-            } catch { /* ignore guard errors */ }
-            // Optionally block on semicolon warnings
-            const warnSemi_RO = lintApi.hasSemicolonWarnings(editor.document);
-            const warnUnd_RO = lintApi.hasUndeclaredWarnings(editor.document);
-            const warnVar_RO = lintApi.hasVarWarnings(editor.document);
-            const shouldBlockRO = (lintApi.getStrictLevel('Semicolon') === 'block' && warnSemi_RO.has)
-              || (lintApi.getStrictLevel('Undeclared') === 'block' && warnUnd_RO.has)
-              || (lintApi.getStrictLevel('NoVar') === 'block' && warnVar_RO.has);
-            if (shouldBlockRO) {
-              (async () => {
-                panel.webview.html = await createHtml('', panel, context.extensionPath, { p5Version: (panel as any)._p5Version });
-                lintApi.logBlockingWarningsForDocument(editor.document);
-              })();
-            } else {
-              sendToWebview(panel, { type: 'reload', code: codeToSend });
-              // Log warnings on explicit open -> reload path
-              lintApi.logSemicolonWarningsForDocument(editor.document);
-              lintApi.logUndeclaredWarningsForDocument(editor.document);
-              lintApi.logVarWarningsForDocument(editor.document);
+              const edToClear = vscode.window.visibleTextEditors.find(e => e.document.uri.toString() === docUri);
+              if (edToClear) clearStepHighlight(edToClear);
+            } catch { }
+            // Also clear any Blockly block highlight for this document when the P5 panel closes
+            try { blocklyApi.clearHighlight(docUri); } catch { }
+            (panel as any)._steppingActive = false;
+            try { contextService.setSteppingActive(docUri, false); } catch { }
+            // Stop auto-step timer if running
+            if ((panel as any)._autoStepTimer) {
+              try { clearInterval((panel as any)._autoStepTimer); } catch { }
+              (panel as any)._autoStepTimer = null;
             }
-          } catch (err: any) {
-            // If error, send empty code and show error
-            sendToWebview(panel, { type: 'reload', code: '' });
-            const syntaxErrorMsg = `${getTime()} [‼️SYNTAX ERROR in ${path.basename(editor.document.fileName)}] ${err.message}`;
-            sendToWebview(panel, { type: 'syntaxError', message: stripLeadingTimestamp(formatSyntaxErrorMsg(syntaxErrorMsg)) });
+            (panel as any)._autoStepMode = false;
+            // Dispose output channel when panel is closed
+            try { (require('./logging/output') as any).disposeOutputForDoc?.(docUri); } catch { }
+          });
+
+          panel.onDidChangeViewState(async e => {
+            if (e.webviewPanel.active) {
+              try {
+                const ch = (require('./logging/output') as any).getOutputChannelForDoc?.(docUri);
+                if (ch) showAndTrackOutputChannel(ch); // <--- in panel.onDidChangeViewState
+              } catch { }
+              // Update restore order to reflect recent activation
+              try { await restore.moveToOrderEnd(editor.document.fileName); } catch { }
+            }
+          });
+
+          if (prep.inputsOverlay && prep.inputsOverlay.length > 0) {
+            const key = editor.document.fileName;
+            let itemsToShow = prep.inputsOverlay;
+            if (hasCachedInputsForKey(key, prep.inputsOverlay)) {
+              const cached = getCachedInputsForKey(key);
+              if (cached) {
+                itemsToShow = prep.inputsOverlay.map((it, i) => ({
+                  varName: it.varName,
+                  label: it.label,
+                  defaultValue: typeof cached.values[i] !== 'undefined' ? cached.values[i] : it.defaultValue,
+                }));
+              }
+            }
+            await setHtmlAndPost(panel, {
+              code: '',
+              extensionPath: context.extensionPath,
+              allowInteractiveTopInputs: _allowInteractiveTopInputs,
+              initialCaptureVisible: getInitialCaptureVisible(panel),
+              p5Version: (panel as any)._p5Version,
+            }, [
+              { delayMs: 150, message: { type: 'showTopInputs', items: itemsToShow } as ExtensionToWebviewMessage },
+            ], sendToWebview);
+            return;
+          }
+
+          if (prep.runtimeErrorMsg) {
+            const friendly = prep.runtimeErrorMsg;
+            await setHtmlAndPost(panel, {
+              code: '',
+              extensionPath: context.extensionPath,
+              allowInteractiveTopInputs: _allowInteractiveTopInputs,
+              initialCaptureVisible: getInitialCaptureVisible(panel),
+              p5Version: (panel as any)._p5Version,
+            }, [
+              { delayMs: 150, message: { type: 'showError', message: friendly } as ExtensionToWebviewMessage },
+            ], sendToWebview);
+            if (cfg.getLogWarningsToOutput()) {
+              outputChannel.appendLine(friendly);
+            }
+            (panel as any)._lastRuntimeError = friendly;
+            (panel as any)._lastSyntaxError = null;
+            return;
+          }
+
+          if (prep.blockOnLint) {
+            await setHtmlAndPost(panel, {
+              code: '',
+              extensionPath: context.extensionPath,
+              allowInteractiveTopInputs: _allowInteractiveTopInputs,
+              initialCaptureVisible: getInitialCaptureVisible(panel),
+              p5Version: (panel as any)._p5Version,
+            }, [], sendToWebview);
+            lintApi.logBlockingWarningsForDocument(editor.document);
+          } else {
+            await setHtmlAndPost(panel, {
+              code: prep.ok ? prep.codeToInject : '',
+              extensionPath: context.extensionPath,
+              allowInteractiveTopInputs: _allowInteractiveTopInputs,
+              initialCaptureVisible: getInitialCaptureVisible(panel),
+              p5Version: (panel as any)._p5Version,
+            }, [], sendToWebview);
+            lintApi.logSemicolonWarningsForDocument(editor.document);
+            lintApi.logUndeclaredWarningsForDocument(editor.document);
+            lintApi.logVarWarningsForDocument(editor.document);
+          }
+
+          if (prep.globals && prep.ok && !prep.blockOnLint) {
+            const varsPayload = prep.globals.variables.map(g => ({ name: g.name, type: g.type, value: undefined }));
+            setTimeout(() => {
+              sendToWebview(panel, { type: 'setGlobalVars', variables: varsPayload, readOnly: prep.globals!.readOnly });
+            }, 200);
+          }
+
+          if (syntaxErrorMsg) {
+            setTimeout(() => {
+              sendToWebview(panel, { type: 'syntaxError', message: stripLeadingTimestamp(syntaxErrorMsg) });
+            }, 150);
             const outputChannel = getOrCreateOutputChannel(docUri, path.basename(editor.document.fileName));
             if (cfg.getLogWarningsToOutput()) {
-              outputChannel.appendLine(formatSyntaxErrorMsg(syntaxErrorMsg));
+              outputChannel.appendLine(syntaxErrorMsg);
             }
           }
-        }, 100);
-      }
+        } else {
+          try {
+            const drawPresent = detectDrawFunction(editor.document.getText());
+            contextService.setHasDraw(docUri, drawPresent);
+            contextService.setDrawLoopPaused(docUri, false);
+          } catch { }
+          panel.reveal(panel.viewColumn, true);
+          setTimeout(() => {
+            let codeToSend = editor.document.getText();
+            // --- Check for syntax/reference errors BEFORE wrapping in setup ---
+            try {
+              new Function(codeToSend);
+              codeToSend = wrapInSetupIfNeeded(codeToSend);
+              try {
+                codeToSend = injectLoopGuards(codeToSend, { tagPrefix: path.basename(editor.document.fileName) }).code;
+              } catch { /* ignore guard errors */ }
+              // Optionally block on semicolon warnings
+              const warnSemi_RO = lintApi.hasSemicolonWarnings(editor.document);
+              const warnUnd_RO = lintApi.hasUndeclaredWarnings(editor.document);
+              const warnVar_RO = lintApi.hasVarWarnings(editor.document);
+              const shouldBlockRO = (lintApi.getStrictLevel('Semicolon') === 'block' && warnSemi_RO.has)
+                || (lintApi.getStrictLevel('Undeclared') === 'block' && warnUnd_RO.has)
+                || (lintApi.getStrictLevel('NoVar') === 'block' && warnVar_RO.has);
+              if (shouldBlockRO) {
+                (async () => {
+                  panel.webview.html = await createHtml('', panel, context.extensionPath, { p5Version: (panel as any)._p5Version });
+                  lintApi.logBlockingWarningsForDocument(editor.document);
+                })();
+              } else {
+                sendToWebview(panel, { type: 'reload', code: codeToSend });
+                // Log warnings on explicit open -> reload path
+                lintApi.logSemicolonWarningsForDocument(editor.document);
+                lintApi.logUndeclaredWarningsForDocument(editor.document);
+                lintApi.logVarWarningsForDocument(editor.document);
+              }
+            } catch (err: any) {
+              // If error, send empty code and show error
+              sendToWebview(panel, { type: 'reload', code: '' });
+              const syntaxErrorMsg = `${getTime()} [‼️SYNTAX ERROR in ${path.basename(editor.document.fileName)}] ${err.message}`;
+              sendToWebview(panel, { type: 'syntaxError', message: stripLeadingTimestamp(formatSyntaxErrorMsg(syntaxErrorMsg)) });
+              const outputChannel = getOrCreateOutputChannel(docUri, path.basename(editor.document.fileName));
+              if (cfg.getLogWarningsToOutput()) {
+                outputChannel.appendLine(formatSyntaxErrorMsg(syntaxErrorMsg));
+              }
+            }
+          }, 100);
+        }
 
-      updateP5Context(editor);
-      if (editor && autoReload) autoReload.setupAutoReloadForDoc(editor);
+        updateP5Context(editor);
+        if (editor && autoReload) autoReload.setupAutoReloadForDoc(editor);
+      } finally {
+        if (usedKidsModeFallback && cleanupDocUri) {
+          try { await closeEditorTabForDoc(cleanupDocUri); } catch { }
+        }
+      }
     }
   });
 
@@ -2072,6 +2324,26 @@ export function activate(context: vscode.ExtensionContext) {
             try { sendToWebview(panel, { type: 'toggleFPS', show }); } catch { }
           }
         }, 100);
+      }
+
+      if (e.affectsConfiguration('P5Studio.blockly.kidsMode') || e.affectsConfiguration('P5Studio.blockly.enableBlockly')) {
+        kidsModeEnabled = cfg.getBlocklyKidsMode();
+        blocklyFeatureEnabled = cfg.getBlocklyEnabled();
+        (async () => {
+          if (!isKidsModeFeatureEnabled()) {
+            kidsModeManagedDocs.clear();
+            kidsModeInFlightDocs.clear();
+            activeKidsModeDocUri = null;
+            await vscode.commands.executeCommand('setContext', 'p5BlocklyKidsModeActive', false);
+            if (!vscode.window.activeTextEditor) {
+              await vscode.commands.executeCommand('setContext', 'hasP5Webview', false);
+            }
+            return;
+          }
+          if (activeKidsModeDocUri) {
+            await updateKidsModeToolbarContext(activeKidsModeDocUri, true);
+          }
+        })();
       }
 
       // Update overlay font size if the editor font size changes (debounced)

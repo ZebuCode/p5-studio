@@ -5,6 +5,7 @@ export type ContextServiceDeps = {
   getActiveP5Panel: () => vscode.WebviewPanel | undefined;
   getDocUriForPanel: (panel: vscode.WebviewPanel) => vscode.Uri | undefined;
   updateVariablesPanel: () => void;
+  getKidsModeDocUri?: () => string | undefined;
 };
 
 export type ContextServiceApi = {
@@ -70,6 +71,13 @@ export function registerContextService(
       const editor = vscode.window.activeTextEditor;
       if (editor) {
         docUriForContext = editor.document.uri.toString();
+      } else if (typeof deps.getKidsModeDocUri === 'function') {
+        try {
+          const kidsUri = deps.getKidsModeDocUri();
+          if (kidsUri) {
+            docUriForContext = kidsUri;
+          }
+        } catch { /* ignore */ }
       }
     }
     const primed = docUriForContext ? !!debugPrimedMap.get(docUriForContext) : false;

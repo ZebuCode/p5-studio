@@ -278,17 +278,17 @@
         {
           "command": "extension.live-p5",
           "group": "navigation@3",
-          "when": "hasP5Project == true && isP5js && !hasP5Webview && (editorLangId == javascript || editorLangId == typescript)"
+          "when": "hasP5Project == true && ((isP5js && !hasP5Webview && (editorLangId == javascript || editorLangId == typescript)) || (p5BlocklyKidsModeActive == true && !hasP5Webview))"
         },
         {
           "command": "extension.open-blockly",
           "group": "navigation@2",
-          "when": "hasP5Project == true && config.P5Studio.blockly.enableBlockly == true && isP5js && p5BlocklyEligible == true && (editorLangId == javascript || editorLangId == typescript)"
+          "when": "hasP5Project == true && config.P5Studio.blockly.enableBlockly == true && ((p5BlocklyKidsModeActive == true && blocklyPanelFocused == true) || (p5BlocklyKidsModeActive != true && isP5js && p5BlocklyEligible == true && (editorLangId == javascript || editorLangId == typescript)))"
         },
         {
           "command": "extension.reload-p5-sketch",
           "group": "navigation@3",
-          "when": "hasP5Project == true && isP5js && hasP5Webview && (editorLangId == javascript || editorLangId == typescript)"
+          "when": "hasP5Project == true && ((isP5js && hasP5Webview && (editorLangId == javascript || editorLangId == typescript)) || (p5BlocklyKidsModeActive == true && hasP5Webview))"
         },
         {
           "command": "P5Studio.disableShowFPS",
@@ -318,27 +318,27 @@
         {
           "command": "P5Studio.stopStepping",
           "group": "navigation@3.1",
-          "when": "hasP5Project == true && isP5js && hasP5Webview && (editorLangId == javascript || editorLangId == typescript) && p5SteppingActive"
+          "when": "hasP5Project == true && ((isP5js && hasP5Webview && (editorLangId == javascript || editorLangId == typescript)) || (p5BlocklyKidsModeActive == true && hasP5Webview)) && p5SteppingActive"
         },
         {
           "command": "P5Studio.debugPrime",
           "group": "navigation@4",
-          "when": "hasP5Project == true && isP5js && hasP5Webview && (editorLangId == javascript || editorLangId == typescript) && !p5DebugPrimed && config.P5Studio.debug.ShowDebugButton"
+          "when": "hasP5Project == true && p5BlocklyKidsModeActive != true && isP5js && hasP5Webview && (editorLangId == javascript || editorLangId == typescript) && !p5DebugPrimed && config.P5Studio.debug.ShowDebugButton"
         },
         {
           "command": "P5Studio.stepRun",
           "group": "navigation@3.2",
-          "when": "hasP5Project == true && isP5js && hasP5Webview && (editorLangId == javascript || editorLangId == typescript) && p5DebugPrimed && config.P5Studio.debug.ShowDebugButton"
+          "when": "hasP5Project == true && p5BlocklyKidsModeActive != true && isP5js && hasP5Webview && (editorLangId == javascript || editorLangId == typescript) && p5DebugPrimed && config.P5Studio.debug.ShowDebugButton"
         },
-          {
+        {
           "command": "P5Studio.singleStep",
           "group": "navigation@3.3",
-          "when": "hasP5Project == true && isP5js && hasP5Webview && (editorLangId == javascript || editorLangId == typescript) && p5DebugPrimed && config.P5Studio.debug.ShowDebugButton"
+          "when": "hasP5Project == true && p5BlocklyKidsModeActive != true && isP5js && hasP5Webview && (editorLangId == javascript || editorLangId == typescript) && p5DebugPrimed && config.P5Studio.debug.ShowDebugButton"
         },
         {
           "command": "P5Studio.continueToBreakpoint",
           "group": "navigation@3.4",
-          "when": "hasP5Project == true && isP5js && hasP5Webview && (editorLangId == javascript || editorLangId == typescript) && p5SteppingActive && config.P5Studio.debug.ShowDebugButton"
+          "when": "hasP5Project == true && p5BlocklyKidsModeActive != true && isP5js && hasP5Webview && (editorLangId == javascript || editorLangId == typescript) && p5SteppingActive && config.P5Studio.debug.ShowDebugButton"
         },
       
         {
@@ -354,12 +354,12 @@
         {
           "command": "P5Studio.toggleReloadWhileTypingOn",
           "group": "navigation@10",
-          "when": "hasP5Project == true && isP5js && liveP5ReloadWhileTypingEnabled == true && (editorLangId == javascript || editorLangId == typescript)"
+          "when": "hasP5Project == true && p5BlocklyKidsModeActive != true && isP5js && (editorLangId == javascript || editorLangId == typescript) && liveP5ReloadWhileTypingEnabled == true"
         },
         {
           "command": "P5Studio.toggleReloadWhileTypingOff",
           "group": "navigation@10",
-          "when": "hasP5Project == true && isP5js && liveP5ReloadWhileTypingEnabled != true && (editorLangId == javascript || editorLangId == typescript)"
+          "when": "hasP5Project == true && p5BlocklyKidsModeActive != true && isP5js && (editorLangId == javascript || editorLangId == typescript) && liveP5ReloadWhileTypingEnabled != true"
         }
       ],
       "explorer/context": [
@@ -516,6 +516,12 @@
             "default": "auto",
             "description": "Blockly theme to use in the Blockly panel. 'auto' follows the editor theme.",
             "order": 15
+          },
+          "P5Studio.blockly.kidsMode": {
+            "type": "boolean",
+            "default": false,
+            "description": "Kid-friendly mode that automatically focuses the Blockly panel instead of the JavaScript editor when opening .js files.",
+            "order": 15.1
           },
           "P5Studio.debug.stepRunDelayMs": {
             "type": "number",
