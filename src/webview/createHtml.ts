@@ -31,8 +31,9 @@ export async function createHtml(
   const showDebugButton = cfg.getShowDebugButton();
   const showFPS = cfg.getShowFPS();
 
-  function escapeBackticks(str: string) {
-    return str.replace(/`/g, '\\`');
+  function toSafeInlineJsStringLiteral(str: string) {
+    // Use JSON string encoding and neutralize </script to keep the HTML parser inside this script tag.
+    return JSON.stringify(str).replace(/<\/(script)/gi, '<\\/$1');
   }
 
   // Sanitize user code: replace literal two-character "\\" + "n" sequences
@@ -52,7 +53,7 @@ export async function createHtml(
   const loopGuardResult = loopGuardEnabled
     ? injectLoopGuards(rewrittenCode, { tagPrefix: sketchFileName || 'sketch' })
     : { code: rewrittenCode, modified: false };
-  const escapedCode = escapeBackticks(loopGuardResult.code);
+  const escapedCode = toSafeInlineJsStringLiteral(loopGuardResult.code);
   const loopGuardHelperScript = LOOP_GUARD_HELPER_SNIPPET.trim();
 
   const uniqueId = Date.now() + '-' + Math.random().toString(36).substr(2, 8);
@@ -179,7 +180,7 @@ ${scriptTags}
 <script>
 // Provide the sketch filename (without extension) to the webview
 window._p5SketchFileName = ${JSON.stringify(sketchFileName)};
-window._p5UserCode = \`${escapedCode}\`;
+window._p5UserCode = ${escapedCode};
 // --- output() alias for console.log ---
 window.output = function(...args) { console.log(...args); };
 // --- Provide MEDIA_FOLDER and INCLUDE_FOLDER globals for user sketches ---
@@ -1564,37 +1565,24 @@ window.onerror = function(message, source, lineno, colno, error) {
   if (!msg.startsWith('[RUNTIME ERROR]')) {
     msg = '[‼️RUNTIME ERROR] ' + msg;
   }
-    let extractedLine = lineno;
-    if (error && error.stack) {
-      let sketchFileName = window._p5SketchFileName || 'sketch';
-      let regex = new RegExp(sketchFileName + '\\\\.js:(\\\\d+)');
-      let match = error.stack.match(regex);
-      if (match) {
-        extractedLine = parseInt(match[1], 10);
-      }
+  let extractedLine = lineno;
+  if (error && error.stack) {
+    const sketchFileName = window._p5SketchFileName || 'sketch';
+    const regex = new RegExp(sketchFileName + '\\\\.js:(\\\\d+)');
+    const match = error.stack.match(regex);
+    if (match) {
+      extractedLine = parseInt(match[1], 10);
     }
-    if (extractedLine !== undefined && extractedLine !== 0) {
-      msg += ' (line ' + extractedLine + ')';
-        dt = window._p5Instance.deltaTime;
-      } else if (typeof window.deltaTime === 'number' && window.deltaTime > 0) {
-        dt = window.deltaTime;
-      } else {
-        dt = ts - lastTs;
-      }
-      let text = '';
-      if (dt > 0 && isFinite(dt)) {
-        const fps = Math.round(1000 / dt);
-        if (fps > 0 && fps <= 240) text = fps + ' fps';
-      }
-      if (el.style.display !== 'none') {
-        el.textContent = text;
-      }
-    } catch {}
-    lastTs = ts;
-    requestAnimationFrame(tick);
   }
-  requestAnimationFrame(tick);
-})();
+  if (extractedLine !== undefined && extractedLine !== 0) {
+    msg += ' (line ' + extractedLine + ')';
+  }
+  showError(msg);
+  try {
+    vscode.postMessage({ type: 'showError', message: msg });
+  } catch {}
+  return false;
+};
 
 // --- Add this handler for unhandled promise rejections ---
 window.onunhandledrejection = function(event) {

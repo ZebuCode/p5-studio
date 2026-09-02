@@ -369,14 +369,14 @@
       ],
       "explorer/context": [
         {
+          "command": "extension.publishP5Html",
+          "when": "resourceExtname == .js",
+          "group": "5_decouple@98"
+        },
+        {
           "command": "extension.decouple-blockly",
           "when": "config.P5Studio.blockly.enableBlockly == true && (resourceExtname == .js || resourceExtname == .ts)",
           "group": "5_decouple@99"
-        },
-        {
-          "command": "extension.publishP5Html",
-          "when": "resourceExtname == .js",
-          "group": "5_cutcopypaste@98"
         },
         {
           "command": "extension.duplicateFile",
