@@ -20,6 +20,7 @@ export type WebviewToExtensionMessage =
     | { type: 'continue-clicked' }
     | { type: 'single-step-clicked' }
     | { type: 'highlightLine'; line: number }
+    | { type: 'gotoErrorLine'; line: number; col?: number }
     | { type: 'clearHighlight'; final?: boolean }
     | { type: 'revealGlobals'; count?: number }
     | { type: 'oscSend'; address: string; args?: any[] }
@@ -37,7 +38,7 @@ export type WebviewToExtensionMessage =
 
 // Messages sent FROM the extension host TO the webview
 export type ExtensionToWebviewMessage =
-    | { type: 'reload'; code: string; preserveGlobals?: boolean; loopPaused?: boolean }
+    | { type: 'reload'; code: string; preserveGlobals?: boolean; loopPaused?: boolean; userLineOffset?: number }
     | { type: 'syntaxError'; message: string }
     | { type: 'showWarning'; message: string }
     | { type: 'showTopInputs'; items: TopInputItem[] }

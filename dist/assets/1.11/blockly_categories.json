@@ -15,7 +15,8 @@
         "p5_auto_stroke",
         "p5_auto_noFill",
         "p5_auto_noStroke",
-        "p5_auto_strokeWeight"
+        "p5_auto_strokeWeight",
+        "p5_auto_text"
       ]
     },
      {
@@ -67,24 +68,6 @@
         "controls_for",
         "controls_forEach",
         "controls_flow_statements"
-      ]
-    },
-    {
-      "name": "Math",
-     "colour": "#5b67a5",
-      "blocks": [
-        "math_arithmetic",
-        "math_single",
-        "math_trig",
-        "math_constant",
-        "math_number_property",
-        "math_round",
-        "math_on_list",
-        "math_modulo",
-        "math_constrain",
-        "math_random_int",
-        "math_random_float",
-        "math_atan2"
       ]
     },
     {
@@ -257,6 +240,7 @@
       "name": "p5 · Math",
       "colour": "#9575CD",
       "blocks": [
+        "math_arithmetic",
         "p5_auto_abs",
         "p5_auto_acos",
         "p5_auto_angleMode",

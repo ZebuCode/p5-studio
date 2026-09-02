@@ -1,0 +1,6 @@
+<script>
+window.onerror = function(m, s, l) { console.log('onerror:', m, s, l); };
+const script = document.createElement('script');
+script.textContent = 'function foo() { throw new Error(123); }\nfoo();\n//# sourceURL=sketch.js\n';
+document.head.appendChild(script);
+</script>

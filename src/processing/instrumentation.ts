@@ -6,6 +6,10 @@ export function instrumentSetupWithDelays(code: string, _delayMs: number): strin
     return code;
 }
 
+export function instrumentRuntimeLineTracking(code: string): string {
+    return code;
+}
+
 // Single-step instrumentation using the declarative step map.
 // We inject minimal helpers and highlight calls in setup()/draw() only;
 // the webview drives stepping with `step-advance` messages.

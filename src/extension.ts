@@ -12,7 +12,7 @@ import { detectTopLevelInputs, hasNonTopInputUsage, preprocessTopLevelInputs, ha
 import { createHtml } from './webview/createHtml';
 import { rewriteFrameCountRefs, wrapInSetupIfNeeded, formatSyntaxErrorMsg, stripLeadingTimestamp, hasOnlySetup, getHiddenGlobalsByDirective } from './processing/astHelpers';
 import { clearStepHighlight, applyStepHighlight } from './editors/stepHighlight';
-import { instrumentSetupForSingleStep } from './processing/instrumentation';
+import { instrumentSetupForSingleStep, instrumentRuntimeLineTracking } from './processing/instrumentation';
 import { OscServiceApi } from './osc/oscService';
 import { registerVariablesService, VariablesServiceApi } from './variables';
 import { registerTriggersService, TriggersServiceApi } from './triggers';
@@ -1729,6 +1729,100 @@ export function activate(context: vscode.ExtensionContext) {
                 blocklyHighlightForLine: (docUri: string, line: number) => { try { blocklyApi.highlightForLine(docUri, line); } catch { } },
               });
             }
+            else if (msg.type === 'gotoErrorLine') {
+              try {
+                const targetLine = Math.max(1, Number(msg.line) || 1);
+                const doc = editor.document;
+                const focused = await vscode.window.showTextDocument(doc, {
+                  preview: false,
+                  preserveFocus: false,
+                  viewColumn: editor.viewColumn,
+                });
+                const lineIdx = Math.min(targetLine - 1, Math.max(0, doc.lineCount - 1));
+                const lineText = doc.lineAt(lineIdx).text;
+                const start = new vscode.Position(lineIdx, 0);
+                const end = new vscode.Position(lineIdx, lineText.length);
+                const flashRange = new vscode.Range(start, end);
+                const redFlashDecoration = vscode.window.createTextEditorDecorationType({
+                  isWholeLine: true,
+                  backgroundColor: 'rgba(255, 59, 48, 0.30)',
+                  overviewRulerColor: 'rgba(255, 59, 48, 0.95)',
+                  overviewRulerLane: vscode.OverviewRulerLane.Right,
+                });
+                focused.selection = new vscode.Selection(start, end);
+                focused.revealRange(new vscode.Range(start, end), vscode.TextEditorRevealType.InCenter);
+                focused.setDecorations(redFlashDecoration, [flashRange]);
+                const isOn = (sel: vscode.Selection | undefined) => !!sel
+                  && sel.start.line === lineIdx
+                  && sel.start.character === 0
+                  && sel.end.line === lineIdx
+                  && sel.end.character === lineText.length;
+                const isOff = (sel: vscode.Selection | undefined) => !!sel
+                  && sel.start.line === lineIdx
+                  && sel.start.character === 0
+                  && sel.end.line === lineIdx
+                  && sel.end.character === 0;
+
+                let onCount = 1; // initial full-line selection above counts as first flash
+                let showing = true;
+                const cleanupDecoration = (ed?: vscode.TextEditor) => {
+                  try {
+                    const target = ed || vscode.window.activeTextEditor;
+                    if (target && target.document.uri.toString() === doc.uri.toString()) {
+                      target.setDecorations(redFlashDecoration, []);
+                    }
+                  } catch { }
+                  try { redFlashDecoration.dispose(); } catch { }
+                };
+                const timer = setInterval(() => {
+                  try {
+                    const active = vscode.window.activeTextEditor;
+                    if (!active || active.document.uri.toString() !== doc.uri.toString()) {
+                      clearInterval(timer);
+                      cleanupDecoration(active);
+                      return;
+                    }
+
+                    const sel = active.selection;
+                    if (!isOn(sel) && !isOff(sel)) {
+                      // User changed selection/cursor; stop animation.
+                      clearInterval(timer);
+                      cleanupDecoration(active);
+                      return;
+                    }
+
+                    if (showing) {
+                      active.selection = new vscode.Selection(start, start);
+                      active.setDecorations(redFlashDecoration, []);
+                      showing = false;
+                    } else {
+                      active.selection = new vscode.Selection(start, end);
+                      active.setDecorations(redFlashDecoration, [flashRange]);
+                      showing = true;
+                      onCount += 1;
+                      if (onCount >= 3) {
+                        clearInterval(timer);
+                        setTimeout(() => {
+                          try {
+                            const finalEd = vscode.window.activeTextEditor;
+                            if (!finalEd || finalEd.document.uri.toString() !== doc.uri.toString()) return;
+                            const finalSel = finalEd.selection;
+                            if (isOn(finalSel) || isOff(finalSel)) {
+                              finalEd.selection = new vscode.Selection(start, start);
+                            }
+                            finalEd.setDecorations(redFlashDecoration, []);
+                          } catch { }
+                          cleanupDecoration();
+                        }, 140);
+                      }
+                    }
+                  } catch {
+                    clearInterval(timer);
+                    cleanupDecoration();
+                  }
+                }, 170);
+              } catch { }
+            }
             // --- CLEAR HIGHLIGHT HANDLER ---
             else if (msg.type === 'clearHighlight') {
               await handleClearHighlight({ panel, editor, final: msg.final }, {
@@ -1895,7 +1989,7 @@ export function activate(context: vscode.ExtensionContext) {
             // --- Check for syntax/reference errors BEFORE wrapping in setup ---
             try {
               new Function(codeToSend);
-              codeToSend = wrapInSetupIfNeeded(codeToSend);
+              codeToSend = wrapInSetupIfNeeded(instrumentRuntimeLineTracking(codeToSend));
               try {
                 codeToSend = injectLoopGuards(codeToSend, { tagPrefix: path.basename(editor.document.fileName) }).code;
               } catch { /* ignore guard errors */ }
@@ -2389,6 +2483,108 @@ export function activate(context: vscode.ExtensionContext) {
       }
       showAndTrackOutputChannel(lastActiveOutputChannel);
       setTimeout(() => vscode.commands.executeCommand('cursorBottom'), 30);
+    })
+  );
+
+  // Export a JS sketch as standalone HTML with inline p5 code
+  context.subscriptions.push(
+    vscode.commands.registerCommand('extension.publishP5Html', async (resource?: vscode.Uri, ...args: any[]) => {
+      try {
+        const pickUriFromArg = (value: any): vscode.Uri | undefined => {
+          if (!value) return undefined;
+          if (value instanceof vscode.Uri) return value;
+          if (Array.isArray(value)) {
+            for (const item of value) {
+              const uri = pickUriFromArg(item);
+              if (uri) return uri;
+            }
+            return undefined;
+          }
+          if (typeof value === 'object') {
+            const maybePath = (value as any).fsPath;
+            if (typeof maybePath === 'string' && maybePath.length > 0) {
+              try { return vscode.Uri.file(maybePath); } catch { return undefined; }
+            }
+          }
+          return undefined;
+        };
+
+        let fileUri = pickUriFromArg(resource) || pickUriFromArg(args);
+
+        if (!fileUri) {
+          const activeUri = vscode.window.activeTextEditor?.document.uri;
+          if (activeUri && activeUri.scheme === 'file') {
+            fileUri = activeUri;
+          }
+        }
+
+        if (!fileUri) {
+          const picked = await vscode.window.showOpenDialog({
+            canSelectFiles: true,
+            canSelectFolders: false,
+            canSelectMany: false,
+            filters: { 'JavaScript Files': ['js'] },
+            openLabel: 'Select p5 sketch',
+          });
+          if (!picked || picked.length === 0) return;
+          fileUri = picked[0];
+        }
+
+        if (path.extname(fileUri.fsPath).toLowerCase() !== '.js') {
+          vscode.window.showErrorMessage('Publish P5 HTML only supports .js files.');
+          return;
+        }
+
+        const sourceBytes = await vscode.workspace.fs.readFile(fileUri);
+        const sketchCode = Buffer.from(sourceBytes).toString('utf8');
+        const escapedSketchCode = sketchCode.replace(/<\/script/gi, '<\\/script');
+
+        const sketchDir = path.dirname(fileUri.fsPath);
+        const sketchBase = path.basename(fileUri.fsPath, path.extname(fileUri.fsPath));
+        const defaultOutput = vscode.Uri.file(path.join(sketchDir, `${sketchBase}.html`));
+
+        const saveUri = await vscode.window.showSaveDialog({
+          defaultUri: defaultOutput,
+          filters: { 'HTML Files': ['html', 'htm'] },
+          saveLabel: 'Publish P5 HTML',
+          title: 'Publish P5 HTML',
+        });
+        if (!saveUri) return;
+
+        const html = [
+          '<!DOCTYPE html>',
+          '<html lang="en">',
+          '<head>',
+          '  <meta charset="UTF-8" />',
+          '  <meta name="viewport" content="width=device-width, initial-scale=1.0" />',
+          `  <title>${sketchBase}</title>`,
+          '  <style>',
+          '    html, body {',
+          '      margin: 0;',
+          '      padding: 0;',
+          '      min-height: 100%;',
+          '      background: #f5f5f5;',
+          '    }',
+          '    canvas {',
+          '      display: block;',
+          '    }',
+          '  </style>',
+          '  <script src="https://cdn.jsdelivr.net/npm/p5@1.11.11/lib/p5.min.js"></script>',
+          '</head>',
+          '<body>',
+          '  <script>',
+          escapedSketchCode,
+          '  </script>',
+          '</body>',
+          '</html>',
+          '',
+        ].join('\n');
+
+        await vscode.workspace.fs.writeFile(saveUri, Buffer.from(html, 'utf8'));
+        vscode.window.showInformationMessage(`Published P5 HTML: ${path.basename(saveUri.fsPath)}`);
+      } catch (e: any) {
+        vscode.window.showErrorMessage('Failed to publish P5 HTML: ' + (e?.message || String(e)));
+      }
     })
   );
 

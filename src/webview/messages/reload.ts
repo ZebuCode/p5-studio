@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { detectDrawFunction } from '../../utils/helpers';
 import { findFirstTemplateLiteral, formatTemplateLiteralError } from '../../processing/astHelpers';
 import { injectLoopGuards } from '../../processing/loopGuards';
+import { instrumentRuntimeLineTracking } from '../../processing/instrumentation';
 
 export async function handleReloadClicked(
   params: { panel: vscode.WebviewPanel; editor: vscode.TextEditor; preserveGlobals?: boolean },
@@ -110,6 +111,32 @@ export async function handleReloadClicked(
       return code;
     }
   };
+  const findLifecycleLine = (code: string, name: 'draw' | 'setup'): number => {
+    try {
+      const lines = String(code || '').split(/\r?\n/);
+      const fnRe = new RegExp('\\bfunction\\s+' + name + '\\s*\\(');
+      const assignRe = new RegExp('\\b' + name + '\\s*=\\s*(?:async\\s*)?(?:function\\s*\\(|\\([^)]*\\)\\s*=>|[A-Za-z_$][A-Za-z0-9_$]*\\s*=>)');
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (fnRe.test(line) || assignRe.test(line)) {
+          return i + 1;
+        }
+      }
+    } catch { }
+    return -1;
+  };
+  const computeUserLineOffset = (originalCode: string, transformedCode: string): number => {
+    try {
+      const originalDraw = findLifecycleLine(originalCode, 'draw');
+      const transformedDraw = findLifecycleLine(transformedCode, 'draw');
+      const originalSetup = findLifecycleLine(originalCode, 'setup');
+      const transformedSetup = findLifecycleLine(transformedCode, 'setup');
+      const drawOffset = (originalDraw > 0 && transformedDraw > 0) ? (transformedDraw - originalDraw) : 0;
+      const setupOffset = (originalSetup > 0 && transformedSetup > 0) ? (transformedSetup - originalSetup) : 0;
+      return drawOffset !== 0 ? drawOffset : setupOffset;
+    } catch { }
+    return 0;
+  };
 
   // Friendly error for inputPrompt misuse
   if (deps.hasNonTopInputUsage(rawCode)) {
@@ -165,7 +192,7 @@ export async function handleReloadClicked(
       deps.setAllowInteractiveTopInputs(false);
       const preprocessed = await deps.preprocessTopLevelInputs(rawCode, { key, interactive: false });
       deps.setAllowInteractiveTopInputs(prev);
-      let code = deps.wrapInSetupIfNeeded(preprocessed);
+      let code = deps.wrapInSetupIfNeeded(instrumentRuntimeLineTracking(preprocessed));
       const globalsInfo = deps.extractGlobalVariablesWithConflicts(code);
       const globals = globalsInfo.globals;
       let rewrittenCode = deps.rewriteUserCodeWithWindowGlobals(code, globals);
@@ -183,7 +210,8 @@ export async function handleReloadClicked(
         }, 600);
       } else {
         const guarded = applyLoopGuards(rewrittenCode);
-        panel.webview.postMessage({ type: 'reload', code: guarded, preserveGlobals: false, loopPaused: targetLoopPaused });
+        const userLineOffset = computeUserLineOffset(preprocessed, guarded);
+        panel.webview.postMessage({ type: 'reload', code: guarded, preserveGlobals: false, loopPaused: targetLoopPaused, userLineOffset });
         setTimeout(() => {
           try { postGlobalsSnapshot(); } catch { }
         }, 200);
@@ -200,7 +228,7 @@ export async function handleReloadClicked(
   }
 
   // No inputs: just run normally (after validation above)
-  let code = deps.wrapInSetupIfNeeded(rawCode);
+  let code = deps.wrapInSetupIfNeeded(instrumentRuntimeLineTracking(rawCode));
   const globalsInfo = deps.extractGlobalVariablesWithConflicts(code);
   const globals = globalsInfo.globals;
   let rewrittenCode = deps.rewriteUserCodeWithWindowGlobals(code, globals);
@@ -225,7 +253,8 @@ export async function handleReloadClicked(
   } else {
     // For sketches with draw(), always reset globals to initial values on reload
     const guarded = applyLoopGuards(rewrittenCode);
-    panel.webview.postMessage({ type: 'reload', code: guarded, preserveGlobals: false, loopPaused: targetLoopPaused });
+    const userLineOffset = computeUserLineOffset(rawCode, guarded);
+    panel.webview.postMessage({ type: 'reload', code: guarded, preserveGlobals: false, loopPaused: targetLoopPaused, userLineOffset });
     setTimeout(() => {
       try { postGlobalsSnapshot(); } catch { }
     }, 200);

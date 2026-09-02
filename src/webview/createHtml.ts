@@ -1564,21 +1564,17 @@ window.onerror = function(message, source, lineno, colno, error) {
   if (!msg.startsWith('[RUNTIME ERROR]')) {
     msg = '[‼️RUNTIME ERROR] ' + msg;
   }
-  showError(msg);
-  vscode.postMessage({ type: 'showError', message: msg });
-  return false; // Let the error propagate in the console as well
-};
-
-// --- FPS indicator updater ---
-(function(){
-  const el = document.getElementById('fps-indicator');
-  if (!el) return;
-  let lastTs = performance.now();
-  function tick(ts){
-    try {
-      // Prefer p5's deltaTime if available; otherwise, use rAF delta
-      let dt = 0;
-      if (window._p5Instance && typeof window._p5Instance.deltaTime === 'number' && window._p5Instance.deltaTime > 0) {
+    let extractedLine = lineno;
+    if (error && error.stack) {
+      let sketchFileName = window._p5SketchFileName || 'sketch';
+      let regex = new RegExp(sketchFileName + '\\\\.js:(\\\\d+)');
+      let match = error.stack.match(regex);
+      if (match) {
+        extractedLine = parseInt(match[1], 10);
+      }
+    }
+    if (extractedLine !== undefined && extractedLine !== 0) {
+      msg += ' (line ' + extractedLine + ')';
         dt = window._p5Instance.deltaTime;
       } else if (typeof window.deltaTime === 'number' && window.deltaTime > 0) {
         dt = window.deltaTime;
@@ -1667,7 +1663,7 @@ function runUserSketch(code){
   script.id = 'user-code-script';
   script.type = 'text/javascript';
   script.setAttribute('data-user-code', 'true');
-  script.textContent = code;
+  script.textContent = code + '\\n//# sourceURL=' + (window._p5SketchFileName || 'sketch') + '.js\\n';
   script.onerror = function(event) {
     let raw = 'Unknown error';
     if (_p5ShouldSuppressError(raw)) { return; }

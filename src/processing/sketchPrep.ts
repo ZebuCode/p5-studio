@@ -22,6 +22,7 @@ import {
     findFirstTemplateLiteral,
     formatTemplateLiteralError,
 } from './astHelpers';
+import { instrumentRuntimeLineTracking } from './instrumentation';
 import type { VarControl } from '../types';
 
 export type ReloadReason = 'typing' | 'save' | 'command' | 'open' | undefined;
@@ -201,6 +202,9 @@ export async function prepareSketch(opts: SketchPrepOptions): Promise<SketchPrep
             blockOnLint: true,
         };
     }
+
+    // Track current sketch line at runtime so error reporting can show source lines.
+    code = instrumentRuntimeLineTracking(code);
 
     // Only wrap if we get here with no errors
     code = wrapInSetupIfNeeded(code);

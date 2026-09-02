@@ -2,7 +2,7 @@
   "name": "p5-studio",
   "displayName": "P5 Studio",
   "description": "Live code p5js in VS Code",
-  "version": "1.1.16",
+  "version": "1.2.2",
   "icon": "images/ICON.png",
   "author": {
     "name": "peterdickx"
@@ -125,6 +125,11 @@
       {
         "command": "extension.duplicateFile",
         "title": "Duplicate",
+        "category": "File"
+      },
+      {
+        "command": "extension.publishP5Html",
+        "title": "Publish P5 HTML",
         "category": "File"
       },
       {
@@ -367,6 +372,11 @@
           "command": "extension.decouple-blockly",
           "when": "config.P5Studio.blockly.enableBlockly == true && (resourceExtname == .js || resourceExtname == .ts)",
           "group": "5_decouple@99"
+        },
+        {
+          "command": "extension.publishP5Html",
+          "when": "resourceExtname == .js",
+          "group": "5_cutcopypaste@98"
         },
         {
           "command": "extension.duplicateFile",

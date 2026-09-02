@@ -71,6 +71,7 @@
       "name": "p5 · Math",
       "colour": "#9575CD",
       "blocks": [
+         "math_arithmetic",
         "p5_auto_abs",
         "p5_auto_ceil",
         "p5_auto_cos",
