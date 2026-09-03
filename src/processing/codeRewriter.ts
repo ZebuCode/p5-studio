@@ -235,7 +235,7 @@ export function rewriteUserCodeWithWindowGlobals(code: string, globals: { name: 
     for (const stmt of programBody) {
         if (stmt.type === 'VariableDeclaration') {
             for (const decl of stmt.declarations) {
-                if (decl.id && decl.id.name && globalNames.has(decl.id.name) && decl.init) {
+                if (stmt.kind !== 'const' && decl.id && decl.id.name && globalNames.has(decl.id.name) && decl.init) {
                     globalAssignments.push(recast.types.builders.expressionStatement(recast.types.builders.assignmentExpression('=', recast.types.builders.identifier(decl.id.name), decl.init)));
                 }
             }
@@ -245,7 +245,7 @@ export function rewriteUserCodeWithWindowGlobals(code: string, globals: { name: 
     // Insert window.<global> = undefined for globals that have initializers only
     for (const g of globals.filter(g => !STEPPING_HELPERS.has(g.name))) {
         // Only assign window.<name> = undefined if the original declaration had an initializer
-        const hadInit = programBody.some(stmt => stmt.type === 'VariableDeclaration' && stmt.declarations.some((decl: any) => decl.id && decl.id.name === g.name && decl.init));
+        const hadInit = programBody.some(stmt => stmt.type === 'VariableDeclaration' && stmt.kind !== 'const' && stmt.declarations.some((decl: any) => decl.id && decl.id.name === g.name && decl.init));
         if (hadInit) {
             newBody.push(recast.types.builders.expressionStatement(
                 recast.types.builders.assignmentExpression('=',
@@ -266,16 +266,63 @@ export function rewriteUserCodeWithWindowGlobals(code: string, globals: { name: 
                 }
             }
             stmt.declarations = stmt.declarations.map((decl: any) => {
-                if (decl.id && decl.id.name && globalNames.has(decl.id.name)) { return Object.assign({}, decl, { init: null }); }
+                if (stmt.kind !== 'const' && decl.id && decl.id.name && globalNames.has(decl.id.name)) { return Object.assign({}, decl, { init: null }); }
                 return decl;
             });
-            if ((stmt.kind === 'let' || stmt.kind === 'const') && stmt.declarations.some((decl: any) => decl.id && decl.id.name && globalNames.has(decl.id.name))) {
+            if (stmt.kind === 'let' && stmt.declarations.some((decl: any) => decl.id && decl.id.name && globalNames.has(decl.id.name))) {
                 stmt = Object.assign({}, stmt, { kind: 'var' });
             }
             newBody.push(stmt);
             for (const decl of stmt.declarations) {
                 if (decl.id && decl.id.name && globalNames.has(decl.id.name)) {
-                    newBody.push(recast.types.builders.expressionStatement(recast.types.builders.assignmentExpression('=', recast.types.builders.memberExpression(recast.types.builders.identifier('window'), recast.types.builders.identifier(decl.id.name), false), recast.types.builders.identifier(decl.id.name))));
+                    if (stmt.kind === 'const') {
+                        newBody.push(recast.types.builders.expressionStatement(
+                            recast.types.builders.callExpression(
+                                recast.types.builders.memberExpression(
+                                    recast.types.builders.identifier('Object'),
+                                    recast.types.builders.identifier('defineProperty'),
+                                    false
+                                ),
+                                [
+                                    recast.types.builders.identifier('window'),
+                                    recast.types.builders.literal(decl.id.name),
+                                    recast.types.builders.objectExpression([
+                                        recast.types.builders.property('init', recast.types.builders.identifier('configurable'), recast.types.builders.literal(true)),
+                                        recast.types.builders.property('init', recast.types.builders.identifier('enumerable'), recast.types.builders.literal(true)),
+                                        recast.types.builders.property(
+                                            'init',
+                                            recast.types.builders.identifier('get'),
+                                            recast.types.builders.functionExpression(
+                                                null,
+                                                [],
+                                                recast.types.builders.blockStatement([
+                                                    recast.types.builders.returnStatement(recast.types.builders.identifier(decl.id.name))
+                                                ])
+                                            )
+                                        ),
+                                        recast.types.builders.property(
+                                            'init',
+                                            recast.types.builders.identifier('set'),
+                                            recast.types.builders.functionExpression(
+                                                null,
+                                                [recast.types.builders.identifier('_value')],
+                                                recast.types.builders.blockStatement([
+                                                    recast.types.builders.throwStatement(
+                                                        recast.types.builders.newExpression(
+                                                            recast.types.builders.identifier('TypeError'),
+                                                            [recast.types.builders.literal('Assignment to constant variable.')]
+                                                        )
+                                                    )
+                                                ])
+                                            )
+                                        )
+                                    ])
+                                ]
+                            )
+                        ));
+                    } else {
+                        newBody.push(recast.types.builders.expressionStatement(recast.types.builders.assignmentExpression('=', recast.types.builders.memberExpression(recast.types.builders.identifier('window'), recast.types.builders.identifier(decl.id.name), false), recast.types.builders.identifier(decl.id.name))));
+                    }
                 }
             }
             continue;
@@ -284,26 +331,9 @@ export function rewriteUserCodeWithWindowGlobals(code: string, globals: { name: 
         if (stmt.type === 'FunctionDeclaration' && stmt.id && stmt.id.name === 'setup' && stmt.body && stmt.body.body) {
             setupFound = true;
             const originalStmt: any = stmt;
-            // Find the last createCanvas call in setup
             const setupStmts = [...stmt.body.body];
-            let lastCreateCanvasIdx = -1;
-            for (let i = 0; i < setupStmts.length; i++) {
-                const s = setupStmts[i];
-                if (s.type === 'ExpressionStatement' && s.expression.type === 'CallExpression' && s.expression.callee.name === 'createCanvas') {
-                    lastCreateCanvasIdx = i;
-                }
-            }
-            // Insert globalAssignments after the last createCanvas, or at the start if not found
-            let newSetupBody = [];
-            if (lastCreateCanvasIdx !== -1) {
-                newSetupBody = [
-                    ...setupStmts.slice(0, lastCreateCanvasIdx + 1),
-                    ...globalAssignments,
-                    ...setupStmts.slice(lastCreateCanvasIdx + 1)
-                ];
-            } else {
-                newSetupBody = [...globalAssignments, ...setupStmts];
-            }
+            // Initialize globals before user setup code so values are available to createCanvas(...)
+            const newSetupBody = [...globalAssignments, ...setupStmts];
             newSetupBody.push(recast.types.builders.expressionStatement(
                 recast.types.builders.assignmentExpression('=',
                     recast.types.builders.memberExpression(recast.types.builders.identifier('window'), recast.types.builders.identifier('_p5SetupDone'), false),

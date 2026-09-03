@@ -9,6 +9,10 @@
     "lib": [
       "es2019"
     ],
+    "types": [
+      "node",
+      "vscode"
+    ],
     "sourceMap": true,
     "rootDir": "src",
     "skipLibCheck": true,
