@@ -4,11 +4,11 @@ export function handleSetGlobalVars(
   params: {
     panel: vscode.WebviewPanel;
     editor: vscode.TextEditor;
-    variables: Array<{ name: string; value: any; type: string; updatedAt?: number }>;
+    variables: Array<{ name: string; value: any; type: string; updatedAt?: number; readonly?: boolean }>;
     generatedAt?: number;
   },
   deps: {
-    setGlobalsForDoc: (docUri: string, list: Array<{ name: string; value: any; type: string; updatedAt?: number }>, opts?: { generatedAt?: number }) => void;
+    setGlobalsForDoc: (docUri: string, list: Array<{ name: string; value: any; type: string; updatedAt?: number; readonly?: boolean }>, opts?: { generatedAt?: number }) => void;
     updateVariablesPanel: () => void;
     isActivePanel: (panel: vscode.WebviewPanel) => boolean;
   }
@@ -34,7 +34,7 @@ export function handleUpdateGlobalVar(
     generatedAt?: number;
   },
   deps: {
-    getGlobalsForDoc: (docUri: string) => Array<{ name: string; value: any; type: string }>;
+    getGlobalsForDoc: (docUri: string) => Array<{ name: string; value: any; type: string; readonly?: boolean }>;
     getLocalsForDoc: (docUri: string) => Array<{ name: string; value: any; type: string }>;
     setGlobalValue: (docUri: string, name: string, value: any, opts?: { updatedAt?: number }) => void;
     hasGlobalDefinition: (docUri: string, name: string) => boolean;

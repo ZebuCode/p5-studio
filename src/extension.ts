@@ -325,6 +325,7 @@ export function activate(context: vscode.ExtensionContext) {
             value: g.value,
             type: g.type,
             control: g.control,
+            readonly: !!g.readonly,
             updatedAt: now,
           })), { generatedAt: now });
           variablesService.resetValuesForDoc(uriStr);
@@ -1258,10 +1259,28 @@ export function activate(context: vscode.ExtensionContext) {
         _allowInteractiveTopInputs = true;
       }
       if (prep.globals) {
+        try {
+          const now = Date.now();
+          const existingGlobals = variablesService.getGlobalsForDoc(docUri) || [];
+          const existingByName = new Map(existingGlobals.map(v => [v.name, v] as const));
+          const nextGlobals = prep.globals.variables.map((g: any) => {
+            const prev = existingByName.get(g.name);
+            return {
+              name: g.name,
+              type: g.type,
+              value: typeof prev?.value !== 'undefined' ? prev.value : g.value,
+              control: g.control,
+              readonly: !!g.readonly,
+              updatedAt: typeof prev?.updatedAt === 'number' ? prev.updatedAt : now,
+            };
+          });
+          variablesService.setGlobalsForDoc(docUri, nextGlobals, { generatedAt: now });
+          updateVariablesPanel();
+        } catch { }
         setTimeout(() => {
           sendToWebview(panel, {
             type: 'setGlobalVars',
-            variables: prep.globals!.variables.map(g => ({ name: g.name, type: g.type, value: undefined })),
+            variables: prep.globals!.variables.map(g => ({ name: g.name, type: g.type, value: undefined, readonly: !!g.readonly })),
             readOnly: prep.globals!.readOnly,
           });
         }, 200);
@@ -1962,7 +1981,7 @@ export function activate(context: vscode.ExtensionContext) {
           }
 
           if (prep.globals && prep.ok && !prep.blockOnLint) {
-            const varsPayload = prep.globals.variables.map(g => ({ name: g.name, type: g.type, value: undefined }));
+            const varsPayload = prep.globals.variables.map(g => ({ name: g.name, type: g.type, value: undefined, readonly: !!g.readonly }));
             setTimeout(() => {
               sendToWebview(panel, { type: 'setGlobalVars', variables: varsPayload, readOnly: prep.globals!.readOnly });
             }, 200);

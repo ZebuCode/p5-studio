@@ -38,9 +38,9 @@ export async function handleReloadClicked(
     getAllowInteractiveTopInputs: () => boolean;
     setAllowInteractiveTopInputs: (v: boolean) => void;
     wrapInSetupIfNeeded: (code: string) => string;
-    extractGlobalVariablesWithConflicts: (code: string) => { globals: Array<{ name: string; value: any; type: string }>; conflicts: string[] };
-    extractGlobalVariables: (code: string) => Array<{ name: string; value: any; type: string }>;
-    rewriteUserCodeWithWindowGlobals: (code: string, globals: Array<{ name: string; value?: any }>) => string;
+    extractGlobalVariablesWithConflicts: (code: string) => { globals: Array<{ name: string; value: any; type: string; readonly?: boolean }>; conflicts: string[] };
+    extractGlobalVariables: (code: string) => Array<{ name: string; value: any; type: string; readonly?: boolean }>;
+    rewriteUserCodeWithWindowGlobals: (code: string, globals: Array<{ name: string; value?: any; readonly?: boolean }>) => string;
     getHiddenGlobalsByDirective: (code: string) => Set<string>;
     hasOnlySetup: (code: string) => boolean;
     setSteppingActive?: (docUri: string, value: boolean) => void;

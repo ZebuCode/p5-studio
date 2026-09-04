@@ -31,9 +31,8 @@ export async function createHtml(
   const showDebugButton = cfg.getShowDebugButton();
   const showFPS = cfg.getShowFPS();
 
-  function toSafeInlineJsStringLiteral(str: string) {
-    // Use JSON string encoding and neutralize </script to keep the HTML parser inside this script tag.
-    return JSON.stringify(str).replace(/<\/(script)/gi, '<\\/$1');
+  function escapeBackticks(str: string) {
+    return str.replace(/`/g, '\\`');
   }
 
   // Sanitize user code: replace literal two-character "\\" + "n" sequences
@@ -53,7 +52,7 @@ export async function createHtml(
   const loopGuardResult = loopGuardEnabled
     ? injectLoopGuards(rewrittenCode, { tagPrefix: sketchFileName || 'sketch' })
     : { code: rewrittenCode, modified: false };
-  const escapedCode = toSafeInlineJsStringLiteral(loopGuardResult.code);
+  const escapedCode = escapeBackticks(loopGuardResult.code);
   const loopGuardHelperScript = LOOP_GUARD_HELPER_SNIPPET.trim();
 
   const uniqueId = Date.now() + '-' + Math.random().toString(36).substr(2, 8);
@@ -180,7 +179,7 @@ ${scriptTags}
 <script>
 // Provide the sketch filename (without extension) to the webview
 window._p5SketchFileName = ${JSON.stringify(sketchFileName)};
-window._p5UserCode = ${escapedCode};
+window._p5UserCode = \`${escapedCode}\`;
 // --- output() alias for console.log ---
 window.output = function(...args) { console.log(...args); };
 // --- Provide MEDIA_FOLDER and INCLUDE_FOLDER globals for user sketches ---
@@ -1642,18 +1641,59 @@ function runUserSketch(code){
   }
   try { window.__p5LoopGuardActive = false; window.__p5LoopGuardMsg = ''; } catch {}
 
-  // Remove previous user code script if present
-  const prevScript = document.getElementById('user-code-script');
-  if (prevScript) prevScript.remove();
-
-  // Inject user code as a new script tag and attach error handler
-  const script = document.createElement('script');
-  script.id = 'user-code-script';
-  script.type = 'text/javascript';
-  script.setAttribute('data-user-code', 'true');
-  script.textContent = code + '\\n//# sourceURL=' + (window._p5SketchFileName || 'sketch') + '.js\\n';
-  script.onerror = function(event) {
-    let raw = 'Unknown error';
+  // Execute user code in an isolated function scope to avoid global re-declaration errors on refresh.
+  const executableCode =
+    '(function(){\\n' +
+    // Clear previous handlers so removed functions don't persist across reloads.
+    'window.preload = undefined;\\n' +
+    'window.setup = undefined;\\n' +
+    'window.draw = undefined;\\n' +
+    'window.windowResized = undefined;\\n' +
+    'window.mouseMoved = undefined;\\n' +
+    'window.mouseDragged = undefined;\\n' +
+    'window.mousePressed = undefined;\\n' +
+    'window.mouseReleased = undefined;\\n' +
+    'window.mouseClicked = undefined;\\n' +
+    'window.doubleClicked = undefined;\\n' +
+    'window.mouseWheel = undefined;\\n' +
+    'window.touchStarted = undefined;\\n' +
+    'window.touchMoved = undefined;\\n' +
+    'window.touchEnded = undefined;\\n' +
+    'window.keyPressed = undefined;\\n' +
+    'window.keyReleased = undefined;\\n' +
+    'window.keyTyped = undefined;\\n' +
+    'window.deviceMoved = undefined;\\n' +
+    'window.deviceTurned = undefined;\\n' +
+    'window.deviceShaken = undefined;\\n' +
+    code + '\\n' +
+    // Re-export local hook functions declared in sketch scope.
+    'window.preload = (typeof preload === "function") ? preload : window.preload;\\n' +
+    'window.setup = (typeof setup === "function") ? setup : window.setup;\\n' +
+    'window.draw = (typeof draw === "function") ? draw : window.draw;\\n' +
+    'window.windowResized = (typeof windowResized === "function") ? windowResized : window.windowResized;\\n' +
+    'window.mouseMoved = (typeof mouseMoved === "function") ? mouseMoved : window.mouseMoved;\\n' +
+    'window.mouseDragged = (typeof mouseDragged === "function") ? mouseDragged : window.mouseDragged;\\n' +
+    'window.mousePressed = (typeof mousePressed === "function") ? mousePressed : window.mousePressed;\\n' +
+    'window.mouseReleased = (typeof mouseReleased === "function") ? mouseReleased : window.mouseReleased;\\n' +
+    'window.mouseClicked = (typeof mouseClicked === "function") ? mouseClicked : window.mouseClicked;\\n' +
+    'window.doubleClicked = (typeof doubleClicked === "function") ? doubleClicked : window.doubleClicked;\\n' +
+    'window.mouseWheel = (typeof mouseWheel === "function") ? mouseWheel : window.mouseWheel;\\n' +
+    'window.touchStarted = (typeof touchStarted === "function") ? touchStarted : window.touchStarted;\\n' +
+    'window.touchMoved = (typeof touchMoved === "function") ? touchMoved : window.touchMoved;\\n' +
+    'window.touchEnded = (typeof touchEnded === "function") ? touchEnded : window.touchEnded;\\n' +
+    'window.keyPressed = (typeof keyPressed === "function") ? keyPressed : window.keyPressed;\\n' +
+    'window.keyReleased = (typeof keyReleased === "function") ? keyReleased : window.keyReleased;\\n' +
+    'window.keyTyped = (typeof keyTyped === "function") ? keyTyped : window.keyTyped;\\n' +
+    'window.deviceMoved = (typeof deviceMoved === "function") ? deviceMoved : window.deviceMoved;\\n' +
+    'window.deviceTurned = (typeof deviceTurned === "function") ? deviceTurned : window.deviceTurned;\\n' +
+    'window.deviceShaken = (typeof deviceShaken === "function") ? deviceShaken : window.deviceShaken;\\n' +
+    '})();\\n' +
+    '//# sourceURL=' + (window._p5SketchFileName || 'sketch') + '.js\\n';
+  try {
+    const runner = new Function('window', executableCode);
+    runner(window);
+  } catch (err) {
+    let raw = (err && err.message ? err.message : String(err));
     if (_p5ShouldSuppressError(raw)) { return; }
     let msg = '[‼️RUNTIME ERROR] ' + raw;
     showError(msg);
@@ -1661,8 +1701,8 @@ function runUserSketch(code){
       vscode.postMessage({ type: "showError", message: msg });
     }
     window._p5Instance = null;
-  };
-  document.head.appendChild(script);
+    return;
+  }
 
   try {
   window._p5Instance = new window.p5();
@@ -2162,11 +2202,37 @@ window.addEventListener("message", e => {
 
 function updateGlobalVarInSketch(name, value) {
   // Always set window[name]; rewritten code references window.<name>
+  function isReadOnlyGlobal(targetName) {
+    try {
+      const d = Object.getOwnPropertyDescriptor(window, targetName);
+      if (!d) return false;
+      // Const-backed globals are exposed through accessor descriptors with a throwing setter.
+      if (typeof d.get === 'function' && typeof d.set === 'function') return true;
+      if ('writable' in d && d.writable === false) return true;
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  if (isReadOnlyGlobal(name)) {
+    return;
+  }
+
+  const safeAssign = (nextValue) => {
+    try {
+      window[name] = nextValue;
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   let type = ((window._p5GlobalVarTypes && window._p5GlobalVarTypes[name]) || typeof window[name]);
   if (type === 'number') {
     const num = Number(value);
     if (!isNaN(num)) {
-  window[name] = num;
+  if (!safeAssign(num)) return;
   try { if (window._p5VarPollLast) window._p5VarPollLast[name] = num; } catch {}
   try {
     if (!window._p5VarUpdateTimes) window._p5VarUpdateTimes = {};
@@ -2175,14 +2241,14 @@ function updateGlobalVarInSketch(name, value) {
     }
   } else if (type === 'boolean') {
     const b = (value === 'true' || value === true);
-  window[name] = b;
+  if (!safeAssign(b)) return;
   try { if (window._p5VarPollLast) window._p5VarPollLast[name] = b; } catch {}
   try {
     if (!window._p5VarUpdateTimes) window._p5VarUpdateTimes = {};
     window._p5VarUpdateTimes[name] = Date.now();
   } catch {}
   } else if (type === 'array' || Array.isArray(value)) {
-  window[name] = value;
+  if (!safeAssign(value)) return;
     try {
       if (window._p5VarPollLast) {
         let serialized = null;
@@ -2196,7 +2262,7 @@ function updateGlobalVarInSketch(name, value) {
       window._p5VarUpdateTimes[name] = Date.now();
     } catch {}
   } else {
-  window[name] = value;
+  if (!safeAssign(value)) return;
   try { if (window._p5VarPollLast) window._p5VarPollLast[name] = value; } catch {}
   try {
     if (!window._p5VarUpdateTimes) window._p5VarUpdateTimes = {};

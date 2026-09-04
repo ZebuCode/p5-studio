@@ -28,7 +28,7 @@ import type { VarControl } from '../types';
 export type ReloadReason = 'typing' | 'save' | 'command' | 'open' | undefined;
 
 export interface SketchPrepGlobals {
-    variables: Array<{ name: string; type: string; control?: VarControl }>;
+    variables: Array<{ name: string; type: string; control?: VarControl; readonly?: boolean }>;
     readOnly: boolean;
 }
 
@@ -210,7 +210,7 @@ export async function prepareSketch(opts: SketchPrepOptions): Promise<SketchPrep
     code = wrapInSetupIfNeeded(code);
 
     // Globals snapshot for Variables panel
-    let filteredGlobals: Array<{ name: string; type: string; control?: VarControl }> = [];
+    let filteredGlobals: Array<{ name: string; type: string; control?: VarControl; readonly?: boolean }> = [];
     let readOnly = false;
     try {
         // Use originalCode for global extraction so variables that were moved inside setup (no-setup/no-draw) still appear

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import type { VarControl } from '../types';
 
-export type GlobalVar = { name: string; value: any; type: string; control?: VarControl };
+export type GlobalVar = { name: string; value: any; type: string; control?: VarControl; readonly?: boolean };
 
 export interface VariablesViewDeps {
   getActiveP5Panel: () => vscode.WebviewPanel | undefined;
@@ -82,6 +82,50 @@ export function registerVariablesView(context: vscode.ExtensionContext, deps: Va
       th.value-col, td.value-col { width: 55%; }
       th.type-col, td.type-col { width: 20%; }
       td.value-col { overflow: hidden; }
+      td.value-col {
+        position: relative;
+      }
+      td.value-col.readonly-cell {
+        padding-right: 22px;
+      }
+      .readonly-lock {
+        position: absolute;
+        right: 6px;
+        top: calc(50% + 3px);
+        transform: translateY(-50%);
+        width: 10px;
+        height: 8px;
+        border-radius: 2px;
+        background: #2f78b9;
+        opacity: 0.95;
+        pointer-events: none;
+        display: inline-block;
+      }
+      .readonly-lock::before {
+        content: '';
+        position: absolute;
+        left: 50%;
+        top: -5px;
+        width: 7px;
+        height: 5px;
+        transform: translateX(-50%);
+        border: 2px solid #2f78b9;
+        border-bottom: none;
+        border-radius: 6px 6px 0 0;
+        box-sizing: border-box;
+      }
+      .readonly-lock::after {
+        content: '';
+        position: absolute;
+        left: 50%;
+        top: 3px;
+        width: 3px;
+        height: 3px;
+        transform: translateX(-50%);
+        border-radius: 50%;
+        background: var(--vscode-editor-background, #1e1e1e);
+        opacity: 0.9;
+      }
       /* Responsive: when the Value column would drop below 256px, hide the Type column */
       table.hide-type-col th.type-col,
       table.hide-type-col td.type-col {
@@ -569,7 +613,7 @@ function toggleEmptyState(show) {
 }
 // Live-patch support to avoid rebuilding the table on each update
 var _rendered = false;
-var _globalsIndex = new Map(); // name -> { type }
+var _globalsIndex = new Map(); // name -> { type, control, readonly }
 var _localsIndex = new Map();
 // Track whether current sketch has a draw() function so we can allow editing
 var _hasDraw = false;
@@ -726,10 +770,12 @@ function buildTable(targetId, vars, scope) {
     var v = vars[i];
     var sliderControl = (v && v.control && v.control.kind === 'slider') ? v.control : null;
     var controlSig = sliderControl ? JSON.stringify([sliderControl.kind, sliderControl.min, sliderControl.max, sliderControl.step]) : '';
-    if (scope === 'globals') _globalsIndex.set(v.name, { type: v.type, control: controlSig }); else _localsIndex.set(v.name, { type: v.type, control: controlSig });
-    html += '<tr><td class="name-col">' + v.name + '</td><td class="value-col">';
+    if (scope === 'globals') _globalsIndex.set(v.name, { type: v.type, control: controlSig, readonly: !!v.readonly }); else _localsIndex.set(v.name, { type: v.type, control: controlSig, readonly: false });
     var isGlobal = scope === 'globals';
-    var editable = isGlobal && _hasDraw;
+    var showReadonlyLock = isGlobal && !!v.readonly;
+    var valueCellClass = showReadonlyLock ? 'value-col readonly-cell' : 'value-col';
+    html += '<tr><td class="name-col">' + v.name + '</td><td class="' + valueCellClass + '">';
+    var editable = isGlobal && _hasDraw && !v.readonly;
     var readonlyAttr = editable ? '' : ' readonly';
     var disabledAttr = editable ? '' : ' disabled';
     if (v.type === 'boolean') {
@@ -764,6 +810,9 @@ function buildTable(targetId, vars, scope) {
     } else {
       html += '<input type="text" data-var="' + v.name + '" data-scope="' + scope + '" value="' + normalizeForInput('text', v.value) + '"' + readonlyAttr + ' />';
     }
+    if (showReadonlyLock) {
+      html += '<span class="readonly-lock" title="Read-only constant" aria-hidden="true"></span>';
+    }
     html += '</td><td class="type-col">' + v.type + '</td></tr>';
   }
   html += '</tbody></table>';
@@ -771,12 +820,17 @@ function buildTable(targetId, vars, scope) {
   tableDiv.innerHTML = html;
   decorateNumberInputs(tableDiv);
   updateTypeColumnVisibilityIn(tableDiv);
+  var varsByName = new Map();
+  for (var k = 0; k < vars.length; ++k) {
+    varsByName.set(vars[k].name, vars[k]);
+  }
   var inputs = tableDiv.querySelectorAll('input[data-var]');
   inputs.forEach(function(input) {
     var name = input.getAttribute('data-var');
     var scopeAttr = input.getAttribute('data-scope') || 'globals';
     var isGlobal = scopeAttr === 'globals';
-    var editable = isGlobal && _hasDraw;
+    var currentVar = varsByName.get(name);
+    var editable = isGlobal && _hasDraw && !(currentVar && currentVar.readonly);
     if (!editable) {
       return; // keep locals and no-draw sketches read-only
     }
@@ -951,7 +1005,7 @@ function patchValues(targetId, vars, scope) {
     var sliderControl = (v && v.control && v.control.kind === 'slider') ? v.control : null;
     var controlSig = sliderControl ? JSON.stringify([sliderControl.kind, sliderControl.min, sliderControl.max, sliderControl.step]) : '';
     var meta = indexMap.get(v.name);
-    if (!meta || meta.type !== v.type || (meta.control || '') !== controlSig) { needRebuild = true; break; }
+    if (!meta || meta.type !== v.type || (meta.control || '') !== controlSig || !!meta.readonly !== !!v.readonly) { needRebuild = true; break; }
   }
   if (needRebuild || !_rendered) { buildTable(targetId, vars, scope); return; }
   for (var j = 0; j < vars.length; ++j) {
@@ -1025,7 +1079,13 @@ window.addEventListener('message', function(event) {
   if (event.data && event.data.type === 'setVarsSplit') {
     var globals = event.data.globals || [];
     var locals = event.data.locals || [];
-    _hasDraw = !!event.data.hasDraw;
+    var nextHasDraw = !!event.data.hasDraw;
+    if (nextHasDraw !== _hasDraw) {
+      _hasDraw = nextHasDraw;
+      _rendered = false;
+    } else {
+      _hasDraw = nextHasDraw;
+    }
     if (event.data.forceRebuild) {
       // Force a rebuild so even the focused slider/field resets.
       _rendered = false;

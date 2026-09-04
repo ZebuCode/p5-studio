@@ -20,6 +20,7 @@ export interface GlobalVar {
     value: any;
     updatedAt?: number;
     control?: VarControl;
+    readonly?: boolean;
 }
 
 export type SliderControl = {

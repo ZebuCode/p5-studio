@@ -9,9 +9,9 @@ export async function handleSubmitTopInputs(
     preprocessTopLevelInputs: (code: string, opts: { key: string; interactive: boolean }) => Promise<string>;
     setCachedInputsForKey: (key: string, items: Array<{ varName: string; label?: string }>, values: any[]) => void;
     wrapInSetupIfNeeded: (code: string) => string;
-    extractGlobalVariables: (code: string) => Array<{ name: string; value: any; type: string; control?: VarControl }>;
-    extractGlobalVariablesWithConflicts: (code: string) => { globals: Array<{ name: string; value: any; type: string; control?: VarControl }>; conflicts: string[] };
-    rewriteUserCodeWithWindowGlobals: (code: string, globals: Array<{ name: string; value?: any; control?: VarControl }>) => string;
+    extractGlobalVariables: (code: string) => Array<{ name: string; value: any; type: string; control?: VarControl; readonly?: boolean }>;
+    extractGlobalVariablesWithConflicts: (code: string) => { globals: Array<{ name: string; value: any; type: string; control?: VarControl; readonly?: boolean }>; conflicts: string[] };
+    rewriteUserCodeWithWindowGlobals: (code: string, globals: Array<{ name: string; value?: any; control?: VarControl; readonly?: boolean }>) => string;
     createHtml: (code: string, panel: vscode.WebviewPanel, extensionPath: string, opts?: { allowInteractiveTopInputs?: boolean; initialCaptureVisible?: boolean }) => Promise<string>;
     getInitialCaptureVisible: (panel: vscode.WebviewPanel) => boolean;
     getExtensionPath: () => string;

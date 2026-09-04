@@ -71,7 +71,7 @@ function createSliderLookup(code: string): (node: any) => VarControl | undefined
 }
 
 // Extract top-level global variables and detect conflicts with reserved names
-export function extractGlobalVariablesWithConflicts(code: string): { globals: { name: string, value: any, type: string, control?: VarControl }[], conflicts: string[] } {
+export function extractGlobalVariablesWithConflicts(code: string): { globals: { name: string, value: any, type: string, control?: VarControl, readonly?: boolean }[], conflicts: string[] } {
     const acorn = require('acorn');
     const ast = recast.parse(code, {
         parser: {
@@ -82,10 +82,10 @@ export function extractGlobalVariablesWithConflicts(code: string): { globals: { 
             }),
         },
     });
-    const globals: { name: string, value: any, type: string, control?: VarControl }[] = [];
+    const globals: { name: string, value: any, type: string, control?: VarControl, readonly?: boolean }[] = [];
     const conflicts: string[] = [];
     const sliderLookup = createSliderLookup(code);
-    function extractFromDecls(decls: any[]) {
+    function extractFromDecls(decls: any[], kind?: string) {
         for (const decl of decls) {
             if (decl.id && decl.id.name) {
                 let value = undefined;
@@ -123,7 +123,7 @@ export function extractGlobalVariablesWithConflicts(code: string): { globals: { 
                 if (RESERVED_GLOBALS.has(decl.id.name)) {
                     conflicts.push(decl.id.name);
                 } else {
-                    globals.push({ name: decl.id.name, value, type, control });
+                    globals.push({ name: decl.id.name, value, type, control, readonly: kind === 'const' });
                 }
             }
         }
@@ -131,21 +131,21 @@ export function extractGlobalVariablesWithConflicts(code: string): { globals: { 
     recast.types.visit(ast, {
         visitVariableDeclaration(path) {
             if (path.parentPath && path.parentPath.value.type === 'Program') {
-                extractFromDecls(path.value.declarations);
+                extractFromDecls(path.value.declarations, path.value.kind);
             }
             this.traverse(path);
         }
     });
     if (ast.program && Array.isArray(ast.program.body)) {
         for (const node of ast.program.body) {
-            if (node.type === 'VariableDeclaration') { extractFromDecls(node.declarations); }
+            if (node.type === 'VariableDeclaration') { extractFromDecls(node.declarations, node.kind); }
         }
     }
     return { globals, conflicts };
 }
 
 // Extract top-level global variables, excluding reserved names
-export function extractGlobalVariables(code: string): { name: string, value: any, type: string, control?: VarControl }[] {
+export function extractGlobalVariables(code: string): { name: string, value: any, type: string, control?: VarControl, readonly?: boolean }[] {
     const acorn = require('acorn');
     const ast = recast.parse(code, {
         parser: {
@@ -156,9 +156,9 @@ export function extractGlobalVariables(code: string): { name: string, value: any
             }),
         },
     });
-    const globals: { name: string, value: any, type: string, control?: VarControl }[] = [];
+    const globals: { name: string, value: any, type: string, control?: VarControl, readonly?: boolean }[] = [];
     const sliderLookup = createSliderLookup(code);
-    function extractFromDecls(decls: any[]) {
+    function extractFromDecls(decls: any[], kind?: string) {
         for (const decl of decls) {
             if (decl.id && decl.id.name) {
                 let value = undefined;
@@ -190,21 +190,21 @@ export function extractGlobalVariables(code: string): { name: string, value: any
                     } catch { value = undefined; type = 'other'; }
                 }
                 const control = type === 'number' ? sliderLookup(decl) : undefined;
-                globals.push({ name: decl.id.name, value, type, control });
+                globals.push({ name: decl.id.name, value, type, control, readonly: kind === 'const' });
             }
         }
     }
     recast.types.visit(ast, {
         visitVariableDeclaration(path) {
             if (path.parentPath && path.parentPath.value.type === 'Program') {
-                extractFromDecls(path.value.declarations);
+                extractFromDecls(path.value.declarations, path.value.kind);
             }
             this.traverse(path);
         }
     });
     if (ast.program && Array.isArray(ast.program.body)) {
         for (const node of ast.program.body) {
-            if (node.type === 'VariableDeclaration') { extractFromDecls(node.declarations); }
+            if (node.type === 'VariableDeclaration') { extractFromDecls(node.declarations, node.kind); }
         }
     }
     return globals.filter(g => !RESERVED_GLOBALS.has(g.name));
