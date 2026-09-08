@@ -40,6 +40,16 @@ function findFirstExecutableLine(code: string): number | null {
 function computeLineOffset(rawCode: string, wrappedCode: string, didWrap: boolean): number {
   if (!didWrap) return 0;
   try {
+    // Prefer structural mapping between raw and wrapped step maps.
+    // This remains stable for setup-only sketches where top-level executable lookup returns null.
+    const rawStepMap = buildStepMap(rawCode);
+    const wrappedStepMap = buildStepMap(wrappedCode);
+    const firstRawStep = rawStepMap.steps.find(s => s.phase === 'setup' || s.phase === 'top-level');
+    const firstWrappedStep = wrappedStepMap.steps.find(s => s.phase === 'setup' || s.phase === 'top-level');
+    if (firstRawStep && firstWrappedStep && typeof firstRawStep.loc?.line === 'number' && typeof firstWrappedStep.loc?.line === 'number') {
+      return firstWrappedStep.loc.line - firstRawStep.loc.line;
+    }
+
     const firstExecutable = findFirstExecutableLine(rawCode);
     const stepMap = buildStepMap(wrappedCode);
     const firstSetupStep = stepMap.steps.find(s => s.phase === 'setup');
@@ -49,7 +59,51 @@ function computeLineOffset(rawCode: string, wrappedCode: string, didWrap: boolea
   } catch {
     // fall back below
   }
-  return 1;
+  // Zero offset is the safest fallback; a hardcoded +1 shifts highlights to non-executable lines.
+  return 0;
+}
+
+function computeContinueBreakpointStepIds(
+  wrappedStepMap: StepMap | undefined,
+  breakpointLines: Set<number>,
+  lineOffset: number,
+  didWrap: boolean
+): number[] {
+  if (!wrappedStepMap || !Array.isArray(wrappedStepMap.steps) || wrappedStepMap.steps.length === 0) {
+    return [];
+  }
+  const ids: number[] = [];
+  const orderedBpLines = Array.from(breakpointLines).sort((a, b) => a - b);
+  for (const bpLine of orderedBpLines) {
+    let chosenId: number | undefined;
+
+    // Prefer an exact adjusted-line match first.
+    for (const step of wrappedStepMap.steps) {
+      if (!step || !step.loc || typeof step.loc.line !== 'number' || typeof step.id !== 'number') continue;
+      const wrappedLine = step.loc.line;
+      const adjustedLine = (didWrap && lineOffset > 0) ? Math.max(1, wrappedLine - lineOffset) : wrappedLine;
+      if (adjustedLine === bpLine) {
+        chosenId = step.id;
+        break;
+      }
+    }
+
+    // Fallback to exact wrapped-line match.
+    if (typeof chosenId !== 'number') {
+      for (const step of wrappedStepMap.steps) {
+        if (!step || !step.loc || typeof step.loc.line !== 'number' || typeof step.id !== 'number') continue;
+        if (step.loc.line === bpLine) {
+          chosenId = step.id;
+          break;
+        }
+      }
+    }
+
+    if (typeof chosenId === 'number' && !ids.includes(chosenId)) {
+      ids.push(chosenId);
+    }
+  }
+  return ids;
 }
 
 export async function handleStepRunClicked(
@@ -108,6 +162,8 @@ export async function handleStepRunClicked(
 
   // If already stepping, enable auto-advance from current position
   if ((panel as any)._steppingActive) {
+    try { panel.webview.postMessage({ type: 'set-fast-continue', enabled: false }); } catch { }
+    try { (panel as any)._continueBreakpointLines = undefined; } catch { }
     if (!(panel as any)._autoStepMode) {
       try { const ch = deps.getOrCreateOutputChannel(docUri, fileName); ch.appendLine(`${deps.getTime()} [▶️INFO] Switched to STEP-RUN: continuing from current statement with ${delayMs}ms delay.`); } catch { }
     }
@@ -190,6 +246,9 @@ export async function handleStepRunClicked(
   wrapped = deps.rewriteFrameCountRefs(wrapped);
   const preGlobals = deps.extractGlobalVariables(wrapped);
   const lineOffsetTotal = computeLineOffset(codeForRun, wrapped, didWrap);
+  try { (panel as any)._debugLineOffset = lineOffsetTotal; } catch { }
+  try { (panel as any)._debugDidWrap = didWrap; } catch { }
+  try { (panel as any)._debugWrappedStepMap = buildStepMap(wrapped); } catch { }
   const globalsPayload = (() => {
     const { globals } = deps.extractGlobalVariablesWithConflicts(wrapped);
     let filteredGlobals = globals.filter(g => ['number', 'string', 'boolean', 'array'].includes(g.type));
@@ -206,7 +265,7 @@ export async function handleStepRunClicked(
     ch.appendLine(instrumented.split('\n').map((l, i) => `${(i + 1).toString().padStart(3, '0')}: ${l}`).join('\n'));
   } catch { }
   const globals = preGlobals;
-  let rewrittenCode = deps.rewriteUserCodeWithWindowGlobals(instrumented, globals);
+  const debugCode = instrumented;
   deps.primeGlobalsForDoc?.(docUri, globalsPayload.filteredGlobals);
   deps.updateVariablesPanel?.();
   const hasDraw = detectDrawFunction(wrapped);
@@ -216,6 +275,8 @@ export async function handleStepRunClicked(
   } catch { }
   try { const ch = deps.getOrCreateOutputChannel(docUri, fileName); ch.appendLine(`${deps.getTime()} [▶️INFO] STEP-RUN started: auto-advancing with ${delayMs}ms delay.`); } catch { }
   const afterLoad = () => {
+    try { panel.webview.postMessage({ type: 'set-fast-continue', enabled: false }); } catch { }
+    try { (panel as any)._continueBreakpointLines = undefined; } catch { }
     panel.webview.postMessage({
       type: 'setGlobalVars',
       variables: globalsPayload.filteredGlobals,
@@ -240,7 +301,7 @@ export async function handleStepRunClicked(
     panel.webview.html = await deps.createHtml(instrumented, panel, deps.getExtensionPath(), { allowInteractiveTopInputs: deps.getAllowInteractiveTopInputs(), initialCaptureVisible: deps.getInitialCaptureVisible(panel) });
     setTimeout(afterLoad, 200);
   } else {
-    panel.webview.postMessage({ type: 'reload', code: rewrittenCode, preserveGlobals: false });
+    panel.webview.postMessage({ type: 'reload', code: debugCode, preserveGlobals: false });
     setTimeout(afterLoad, 200);
   }
 }
@@ -275,15 +336,80 @@ export async function handleContinueClicked(
   (panel as any)._autoStepMode = true;
   (panel as any)._steppingActive = true;
   (panel as any)._suppressHighlightUntilBreakpoint = true;
-  const fastAdvance = () => {
+  const breakpointLines: number[] = [];
+  const bpSet = new Set<number>();
+  try {
+    const bps = vscode.debug.breakpoints || [];
+    for (const bp of bps) {
+      if (!bp.enabled || !(bp instanceof vscode.SourceBreakpoint)) continue;
+      const loc = bp.location;
+      if (!loc || !loc.uri || loc.uri.toString() !== docUri) continue;
+      const line1 = loc.range.start.line + 1;
+      if (line1 >= 1) bpSet.add(line1);
+    }
+  } catch { }
+  bpSet.forEach((n) => breakpointLines.push(n));
+  const wrappedStepMap = (panel as any)._debugWrappedStepMap as StepMap | undefined;
+  const lineOffset = Number((panel as any)._debugLineOffset || 0);
+  const didWrap = !!(panel as any)._debugDidWrap;
+  const breakpointStepIds = computeContinueBreakpointStepIds(wrappedStepMap, bpSet, lineOffset, didWrap);
+  const skipStepId = Number((panel as any)._lastPausedStepId || 0);
+  try {
+    (panel as any)._continueSkipStepId = skipStepId > 0 ? skipStepId : undefined;
+    (panel as any)._continueSkipConsumed = false;
+  } catch { }
+  try {
+    const ch = deps.getOrCreateOutputChannel(docUri, fileName);
+    ch.appendLine(`${deps.getTime()} [DEBUG] continue-armed lines=[${breakpointLines.join(',')}] stepIds=[${breakpointStepIds.join(',')}] skipStep=${skipStepId > 0 ? skipStepId : '-'} didWrap=${didWrap ? 1 : 0} offset=${lineOffset}`);
+  } catch { }
+  try { (panel as any)._continueBreakpointLines = new Set<number>(breakpointLines); } catch { }
+  try { panel.webview.postMessage({ type: 'set-fast-continue', enabled: true, breakpointLines, breakpointStepIds, skipStepId: skipStepId > 0 ? skipStepId : undefined }); } catch { }
+}
+
+export async function handleStepIntoClicked(
+  params: { panel: vscode.WebviewPanel; editor: vscode.TextEditor },
+  deps: {
+    getTime: () => string;
+    getOrCreateOutputChannel: (docUri: string, fileName: string) => vscode.OutputChannel;
+    setSteppingActive?: (docUri: string, value: boolean) => void;
+  }
+) {
+  const { panel, editor } = params;
+  const docUri = editor.document.uri.toString();
+  const fileName = require('path').basename(editor.document.fileName);
+
+  if (!(panel as any)._steppingActive) {
     try {
-      if (!(panel as any)._autoStepMode) return;
-      panel.webview.postMessage({ type: 'step-advance' });
+      const ch = deps.getOrCreateOutputChannel(docUri, fileName);
+      ch.appendLine(`${deps.getTime()} [⚠️INFO] Step Into requested but stepping is not active. Use SINGLE-STEP first.`);
     } catch { }
-  };
-  // Kick once immediately so we leave the current paused state.
-  fastAdvance();
-  (panel as any)._autoStepTimer = setInterval(fastAdvance, 1);
+    return;
+  }
+
+  if ((panel as any)._autoStepTimer) {
+    try { clearInterval((panel as any)._autoStepTimer); } catch { }
+    (panel as any)._autoStepTimer = null;
+  }
+  (panel as any)._autoStepMode = false;
+  (panel as any)._suppressHighlightUntilBreakpoint = false;
+
+  const currentStepId = Number((panel as any)._lastHighlightedStepId || (panel as any)._lastPausedStepId || 0);
+  if (!Number.isFinite(currentStepId) || currentStepId < 1) {
+    try {
+      const ch = deps.getOrCreateOutputChannel(docUri, fileName);
+      ch.appendLine(`${deps.getTime()} [⚠️INFO] Step Into unavailable at the current location.`);
+    } catch { }
+    return;
+  }
+
+  try { deps.setSteppingActive?.(docUri, true); } catch { }
+  try { panel.webview.postMessage({ type: 'set-fast-continue', enabled: false }); } catch { }
+  try { panel.webview.postMessage({ type: 'set-step-into-target', stepId: Math.trunc(currentStepId) }); } catch { }
+  try { panel.webview.postMessage({ type: 'step-advance' }); } catch { }
+  try {
+    const ch = deps.getOrCreateOutputChannel(docUri, fileName);
+    ch.appendLine(`${deps.getTime()} [↘️INFO] Step Into requested at step ${Math.trunc(currentStepId)}.`);
+  } catch { }
 }
 
 export async function handleSingleStepClicked(
@@ -341,6 +467,8 @@ export async function handleSingleStepClicked(
     (panel as any)._autoStepTimer = null;
     (panel as any)._autoStepMode = false;
   }
+  try { panel.webview.postMessage({ type: 'set-fast-continue', enabled: false }); } catch { }
+  try { (panel as any)._continueBreakpointLines = undefined; } catch { }
   (panel as any)._suppressHighlightUntilBreakpoint = false;
   const isStepping = !!(panel as any)._steppingActive;
   if (isStepping) {
@@ -421,6 +549,9 @@ export async function handleSingleStepClicked(
   wrapped = deps.rewriteFrameCountRefs(wrapped);
   const preGlobals = deps.extractGlobalVariables(wrapped);
   const lineOffsetTotal = computeLineOffset(codeForRun, wrapped, didWrap);
+  try { (panel as any)._debugLineOffset = lineOffsetTotal; } catch { }
+  try { (panel as any)._debugDidWrap = didWrap; } catch { }
+  try { (panel as any)._debugWrappedStepMap = buildStepMap(wrapped); } catch { }
   const globalsPayload = (() => {
     const { globals } = deps.extractGlobalVariablesWithConflicts(wrapped);
     let filteredGlobals = globals.filter(g => ['number', 'string', 'boolean', 'array'].includes(g.type));
@@ -432,7 +563,7 @@ export async function handleSingleStepClicked(
   const revealableGlobals = globalsPayload.filteredGlobals.map(g => g.name);
   let instrumented = deps.instrumentSetupForSingleStep(wrapped, lineOffsetTotal, { docStepMap, topLevelGlobals: revealableGlobals });
   const globals = preGlobals;
-  let rewrittenCode = deps.rewriteUserCodeWithWindowGlobals(instrumented, globals);
+  const debugCode = instrumented;
   deps.primeGlobalsForDoc?.(docUri, globalsPayload.filteredGlobals);
   deps.updateVariablesPanel?.();
   const hasDraw = detectDrawFunction(wrapped);
@@ -441,6 +572,8 @@ export async function handleSingleStepClicked(
     if (!hasDraw) deps.setDrawLoopPaused?.(docUri, false);
   } catch { }
   const sendGlobals = () => {
+    try { panel.webview.postMessage({ type: 'set-fast-continue', enabled: false }); } catch { }
+    try { (panel as any)._continueBreakpointLines = undefined; } catch { }
     panel.webview.postMessage({
       type: 'setGlobalVars',
       variables: globalsPayload.filteredGlobals,
@@ -454,7 +587,7 @@ export async function handleSingleStepClicked(
     panel.webview.html = await deps.createHtml(instrumented, panel, deps.getExtensionPath());
     setTimeout(sendGlobals, 200);
   } else {
-    panel.webview.postMessage({ type: 'reload', code: rewrittenCode, preserveGlobals: false });
+    panel.webview.postMessage({ type: 'reload', code: debugCode, preserveGlobals: false });
     setTimeout(sendGlobals, 200);
   }
 }

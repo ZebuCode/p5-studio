@@ -32,6 +32,7 @@ export function handleUpdateGlobalVar(
     name: string;
     value: any;
     generatedAt?: number;
+    scope?: 'globals' | 'locals';
   },
   deps: {
     getGlobalsForDoc: (docUri: string) => Array<{ name: string; value: any; type: string; readonly?: boolean }>;
@@ -45,6 +46,18 @@ export function handleUpdateGlobalVar(
 ) {
   try {
     const thisDocUri = params.editor.document.uri.toString();
+    if (params.scope === 'locals') {
+      let forcedType = 'string';
+      try {
+        if (Array.isArray(params.value)) forcedType = 'array';
+        else if (typeof params.value === 'number') forcedType = 'number';
+        else if (typeof params.value === 'boolean') forcedType = 'boolean';
+        else if (params.value && typeof params.value === 'object') forcedType = 'object';
+      } catch { }
+      deps.upsertLocal(thisDocUri, { name: String(params.name), value: params.value, type: forcedType });
+      if (deps.isActivePanel(params.panel)) deps.updateVariablesPanel();
+      return;
+    }
     const globals = deps.getGlobalsForDoc(thisDocUri) || [];
     const isGlobal = globals.some(v => v.name === params.name) || deps.hasGlobalDefinition(thisDocUri, params.name);
     if (isGlobal) {

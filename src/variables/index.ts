@@ -47,6 +47,7 @@ const inferType = (value: any): string => {
   if (Array.isArray(value)) return 'array';
   const t = typeof value;
   if (t === 'number' || t === 'boolean' || t === 'string') return t;
+  if (t === 'object' && value !== null) return 'object';
   return 'string';
 };
 

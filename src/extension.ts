@@ -47,7 +47,7 @@ import { handleFocusScriptTab } from './webview/messages/focus';
 import { handleCopyCanvasImage } from './webview/messages/image';
 import { handleSubmitTopInputs } from './webview/messages/inputs';
 import { handleReloadClicked } from './webview/messages/reload';
-import { handleStepRunClicked, handleSingleStepClicked, handleContinueClicked } from './webview/messages/step';
+import { handleStepRunClicked, handleSingleStepClicked, handleContinueClicked, handleStepIntoClicked } from './webview/messages/step';
 import { handleHighlightLine, handleClearHighlight } from './webview/messages/highlight';
 import { handleSaveCanvasImage } from './webview/messages/saveImage';
 import { hasBreakpointOnLine } from './debug/breakpoints';
@@ -291,6 +291,9 @@ export function activate(context: vscode.ExtensionContext) {
   async function invokeSingleStep(panel: vscode.WebviewPanel, editor: vscode.TextEditor) {
     try { sendToWebview(panel, { type: 'invokeSingleStep' }); } catch { }
   }
+  async function invokeStepInto(panel: vscode.WebviewPanel, editor: vscode.TextEditor) {
+    try { sendToWebview(panel, { type: 'invokeStepInto' }); } catch { }
+  }
   async function invokeReload(panel: vscode.WebviewPanel, opts?: { preserveGlobals?: boolean }) {
     const preserveGlobals = opts?.preserveGlobals !== false;
     try { sendToWebview(panel, { type: 'invokeReload', preserveGlobals }); } catch { }
@@ -457,6 +460,7 @@ export function activate(context: vscode.ExtensionContext) {
     invokeStepRun: (panel, editor) => invokeStepRun(panel, editor),
     invokeContinue: (panel, editor) => invokeContinue(panel, editor),
     invokeSingleStep: (panel, editor) => invokeSingleStep(panel, editor),
+    invokeStepInto: (panel, editor) => invokeStepInto(panel, editor),
     contextService,
   });
   registerCaptureCommands(context, {
@@ -1486,7 +1490,7 @@ export function activate(context: vscode.ExtensionContext) {
               updateVariablesPanel();
               return;
             } else if (msg.type === 'updateGlobalVar') {
-              handleUpdateGlobalVar({ panel, editor, name: msg.name, value: msg.value, generatedAt: msg.generatedAt }, {
+              handleUpdateGlobalVar({ panel, editor, name: msg.name, value: msg.value, generatedAt: msg.generatedAt, scope: (msg as any).scope }, {
                 getGlobalsForDoc: (docUri) => variablesService.getGlobalsForDoc(docUri),
                 getLocalsForDoc: (docUri) => variablesService.getLocalsForDoc(docUri),
                 setGlobalValue: (docUri, name, value, opts) => variablesService.setGlobalValue(docUri, name, value, opts),
@@ -1725,6 +1729,15 @@ export function activate(context: vscode.ExtensionContext) {
                 } catch { }
               }, 400);
             }
+            else if (msg.type === 'step-into-clicked') {
+              try { contextService.setSteppingActive(docUri, true); } catch { }
+              await handleStepIntoClicked({ panel, editor }, {
+                getTime,
+                getOrCreateOutputChannel,
+                setSteppingActive: (doc, value) => { try { contextService.setSteppingActive(doc, value); } catch { } },
+              });
+              return;
+            }
             else if (msg.type === 'startOSC') {
               // Start OSC server, use args if provided (all four override params)
               await startOscServer(
@@ -1740,7 +1753,7 @@ export function activate(context: vscode.ExtensionContext) {
             }
             // --- HIGHLIGHT CURRENT LINE HANDLER ---
             else if (msg.type === 'highlightLine') {
-              await handleHighlightLine({ panel, editor, line: msg.line }, {
+              await handleHighlightLine({ panel, editor, line: msg.line, rawLine: (msg as any).rawLine, stepId: (msg as any).stepId, virtualBreakpoint: !!(msg as any).virtualBreakpoint }, {
                 getTime,
                 getOrCreateOutputChannel,
                 applyStepHighlight,

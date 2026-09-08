@@ -2,7 +2,7 @@
   "name": "p5-studio",
   "displayName": "P5 Studio",
   "description": "Live code p5js in VS Code",
-  "version": "1.2.2",
+  "version": "1.2.4",
   "icon": "images/ICON.png",
   "author": {
     "name": "peterdickx"
@@ -161,6 +161,15 @@
             "icon": {
             "light": "images/step.svg",
             "dark": "images/step.svg"
+          },
+          "category": "P5 Studio"
+        },
+        {
+          "command": "P5Studio.stepInto",
+          "title": "Step Into",
+          "icon": {
+            "light": "images/step-into.svg",
+            "dark": "images/step-into.svg"
           },
           "category": "P5 Studio"
         },
@@ -338,6 +347,11 @@
         {
           "command": "P5Studio.singleStep",
           "group": "navigation@3.3",
+          "when": "hasP5Project == true && p5BlocklyKidsModeActive != true && isP5js && hasP5Webview && (editorLangId == javascript || editorLangId == typescript) && p5DebugPrimed && config.P5Studio.debug.ShowDebugButton"
+        },
+        {
+          "command": "P5Studio.stepInto",
+          "group": "navigation@3.35",
           "when": "hasP5Project == true && p5BlocklyKidsModeActive != true && isP5js && hasP5Webview && (editorLangId == javascript || editorLangId == typescript) && p5DebugPrimed && config.P5Studio.debug.ShowDebugButton"
         },
         {

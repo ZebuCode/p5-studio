@@ -58,6 +58,12 @@ export function instrumentSetupForSingleStep(
 
         const revealEligible = new Set<string>((opts?.topLevelGlobals || []).map(name => String(name)));
         const restrictReveals = revealEligible.size > 0;
+        const trackedGlobals = new Set<string>((opts?.topLevelGlobals || []).map(name => String(name)));
+        const shouldPostLiveUpdate = (name?: string) => {
+            if (!name) return false;
+            if (trackedGlobals.size === 0) return true;
+            return trackedGlobals.has(name);
+        };
         const topLevelVarCounts = new Map<string, number>();
         for (const node of topLevelBody) {
             if (!node || node.type !== 'VariableDeclaration') continue;
@@ -80,15 +86,21 @@ export function instrumentSetupForSingleStep(
         const setupSteps = stepMap.steps.filter(s => s.phase === 'setup');
         const drawSteps = stepMap.steps.filter(s => s.phase === 'draw');
         const functionStepsByName = new Map<string, any[]>();
-        for (const step of stepMap.steps) {
-            if (step.phase === 'function' && step.functionName) {
-                if (!functionStepsByName.has(step.functionName)) {
-                    functionStepsByName.set(step.functionName, []);
-                }
-                functionStepsByName.get(step.functionName)!.push(step);
-            }
+        // Keep helper functions synchronous in debug mode.
+        // Converting arbitrary helpers to async breaks expression call sites
+        // (e.g. `const x = helper()` becomes a Promise).
+        const asyncFunctionNames = new Set<string>();
+        for (const s of stepMap.steps) {
+            if (!s || s.phase !== 'function' || !s.functionName) continue;
+            const name = String(s.functionName);
+            if (!functionStepsByName.has(name)) functionStepsByName.set(name, []);
+            functionStepsByName.get(name)!.push(s);
+            asyncFunctionNames.add(name);
         }
-        const asyncFunctionNames = new Set(Array.from(functionStepsByName.keys()));
+        for (const [name, list] of functionStepsByName.entries()) {
+            list.sort((a, b) => a.loc.line - b.loc.line || a.loc.column - b.loc.column);
+            functionStepsByName.set(name, list);
+        }
 
         const markSetupDoneExpr = () => b.expressionStatement(
             b.assignmentExpression('=',
@@ -144,8 +156,114 @@ export function instrumentSetupForSingleStep(
             b.assignmentExpression('=',
                 b.memberExpression(b.identifier('window'), b.identifier('__highlight')),
                 b.arrowFunctionExpression(
-                    [b.identifier('l'), b.identifier('c'), b.identifier('el'), b.identifier('ec'), b.identifier('n')],
+                    [b.identifier('l'), b.identifier('c'), b.identifier('el'), b.identifier('ec'), b.identifier('n'), b.identifier('s')],
                     b.blockStatement([
+                        b.variableDeclaration('const', [
+                            b.variableDeclarator(b.identifier('__rawLine'), b.identifier('l')),
+                            b.variableDeclarator(b.identifier('__line'), createAdjustedLineExpr('l')),
+                            b.variableDeclarator(b.identifier('__endLine'), createAdjustedLineExpr('el')),
+                            b.variableDeclarator(
+                                b.identifier('__isContinueBpByStep'),
+                                b.logicalExpression('&&',
+                                    b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueMode')),
+                                    b.logicalExpression('&&',
+                                        b.binaryExpression('===', b.unaryExpression('typeof', b.identifier('s'), true), b.literal('number')),
+                                        b.memberExpression(
+                                            b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueBreakpointSteps')),
+                                            b.identifier('s'),
+                                            true
+                                        )
+                                    )
+                                )
+                            ),
+                            b.variableDeclarator(
+                                b.identifier('__skipCurrentContinueHit'),
+                                b.logicalExpression('&&',
+                                    b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueMode')),
+                                    b.logicalExpression('&&',
+                                        b.unaryExpression('!', b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueSkipDone'))),
+                                        b.logicalExpression('&&',
+                                            b.binaryExpression('===', b.unaryExpression('typeof', b.identifier('s'), true), b.literal('number')),
+                                            b.binaryExpression('===', b.identifier('s'), b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueSkipStepId')))
+                                        )
+                                    )
+                                )
+                            ),
+                            b.variableDeclarator(
+                                b.identifier('__isContinueBpByLine'),
+                                b.logicalExpression('&&',
+                                    b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueMode')),
+                                    b.logicalExpression('||',
+                                        b.memberExpression(
+                                            b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueBreakpoints')),
+                                            b.identifier('__line'),
+                                            true
+                                        ),
+                                        b.logicalExpression('||',
+                                            b.memberExpression(
+                                                b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueBreakpoints')),
+                                                b.identifier('__rawLine'),
+                                                true
+                                            ),
+                                            b.logicalExpression('||',
+                                                b.memberExpression(
+                                                    b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueBreakpoints')),
+                                                    b.binaryExpression('+', b.identifier('__line'), b.literal(1)),
+                                                    true
+                                                ),
+                                                b.logicalExpression('||',
+                                                    b.memberExpression(
+                                                        b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueBreakpoints')),
+                                                        b.binaryExpression('-', b.identifier('__line'), b.literal(1)),
+                                                        true
+                                                    ),
+                                                    b.logicalExpression('||',
+                                                        b.memberExpression(
+                                                            b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueBreakpoints')),
+                                                            b.binaryExpression('+', b.identifier('__rawLine'), b.literal(1)),
+                                                            true
+                                                        ),
+                                                        b.memberExpression(
+                                                            b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueBreakpoints')),
+                                                            b.binaryExpression('-', b.identifier('__rawLine'), b.literal(1)),
+                                                            true
+                                                        )
+                                                    )
+                                                )
+                                            )
+                                        )
+                                    )
+                                )
+                            ),
+                            b.variableDeclarator(
+                                b.identifier('__isContinueBp'),
+                                b.logicalExpression('&&',
+                                    b.unaryExpression('!', b.identifier('__skipCurrentContinueHit')),
+                                    b.conditionalExpression(
+                                        b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueHasStepTargets')),
+                                        b.identifier('__isContinueBpByStep'),
+                                        b.logicalExpression('||', b.identifier('__isContinueBpByStep'), b.identifier('__isContinueBpByLine'))
+                                    )
+                                )
+                            )
+                        ]),
+                        b.ifStatement(
+                            b.identifier('__skipCurrentContinueHit'),
+                            b.blockStatement([
+                                b.expressionStatement(
+                                    b.assignmentExpression('=',
+                                        b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueSkipDone')),
+                                        b.literal(true)
+                                    )
+                                )
+                            ])
+                        ),
+                        b.expressionStatement(
+                            b.assignmentExpression('=',
+                                b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinuePauseHere')),
+                                b.identifier('__isContinueBp')
+                            )
+                        ),
                         b.ifStatement(
                             b.memberExpression(b.identifier('window'), b.identifier('__liveP5SteppingDone')),
                             b.blockStatement([b.returnStatement(null)])
@@ -157,9 +275,12 @@ export function instrumentSetupForSingleStep(
                                         b.memberExpression(b.identifier('vscode'), b.identifier('postMessage')),
                                         [b.objectExpression([
                                             b.property('init', b.identifier('type'), b.literal('highlightLine')),
-                                            b.property('init', b.identifier('line'), createAdjustedLineExpr('l')),
+                                            b.property('init', b.identifier('line'), b.identifier('__line')),
+                                            b.property('init', b.identifier('rawLine'), b.identifier('__rawLine')),
+                                            b.property('init', b.identifier('stepId'), b.identifier('s')),
+                                            b.property('init', b.identifier('virtualBreakpoint'), b.identifier('__isContinueBp')),
                                             b.property('init', b.identifier('column'), b.identifier('c')),
-                                            b.property('init', b.identifier('endLine'), createAdjustedLineExpr('el')),
+                                            b.property('init', b.identifier('endLine'), b.identifier('__endLine')),
                                             b.property('init', b.identifier('endColumn'), b.identifier('ec'))
                                         ])]
                                     )
@@ -230,18 +351,28 @@ export function instrumentSetupForSingleStep(
                 b.identifier('__waitStep'),
                 b.arrowFunctionExpression(
                     [],
-                    b.newExpression(b.identifier('Promise'), [
-                        b.arrowFunctionExpression([b.identifier('rs')],
-                            b.blockStatement([
-                                b.expressionStatement(
-                                    b.assignmentExpression('=',
-                                        b.memberExpression(b.identifier('window'), b.identifier('__liveP5StepResolve')),
-                                        b.identifier('rs')
+                    b.conditionalExpression(
+                        b.logicalExpression('&&',
+                            b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueMode')),
+                            b.unaryExpression('!', b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinuePauseHere')))
+                        ),
+                        b.callExpression(
+                            b.memberExpression(b.identifier('Promise'), b.identifier('resolve')),
+                            []
+                        ),
+                        b.newExpression(b.identifier('Promise'), [
+                            b.arrowFunctionExpression([b.identifier('rs')],
+                                b.blockStatement([
+                                    b.expressionStatement(
+                                        b.assignmentExpression('=',
+                                            b.memberExpression(b.identifier('window'), b.identifier('__liveP5StepResolve')),
+                                            b.identifier('rs')
+                                        )
                                     )
-                                )
-                            ])
-                        )
-                    ])
+                                ])
+                            )
+                        ])
+                    )
                 )
             )
         ]);
@@ -339,6 +470,12 @@ export function instrumentSetupForSingleStep(
                 hasSetupFunctionDecl ? b.literal(false) : b.literal(true)
             )
         );
+        const stepIntoActiveInit = b.expressionStatement(
+            b.assignmentExpression('=',
+                b.memberExpression(b.identifier('window'), b.identifier('__liveP5StepIntoActive')),
+                b.literal(false)
+            )
+        );
         const frameWaitInit = setFrameWaitExpr(true);
         const frameInProgressInit = setFrameInProgressExpr(false);
         const steppingDoneInit = b.expressionStatement(
@@ -348,7 +485,7 @@ export function instrumentSetupForSingleStep(
             )
         );
         const frameCounterInit = setFrameCounterExpr(0);
-        helpers.push(highlightDecl, clearDecl, waitDecl, advanceDecl, revealGlobalsDecl, setupDoneInit, frameCounterInit, frameWaitInit, frameInProgressInit, steppingDoneInit, ...exposeHelpers);
+        helpers.push(highlightDecl, clearDecl, waitDecl, advanceDecl, revealGlobalsDecl, setupDoneInit, stepIntoActiveInit, frameCounterInit, frameWaitInit, frameInProgressInit, steppingDoneInit, ...exposeHelpers);
 
         // Helper to create a highlight call from a StepTarget.
         const docLookup = (() => {
@@ -357,7 +494,7 @@ export function instrumentSetupForSingleStep(
             const map = new Map<string, StepTarget[]>();
             for (const s of docStepMap.steps) {
                 if (!s || !s.loc) continue;
-                const key = `${s.nodeType}::${normalizeSnippet(s.snippet || '')}::${s.functionName || ''}`;
+                const key = `${s.phase}::${s.nodeType}::${normalizeSnippet(s.snippet || '')}::${s.functionName || ''}`;
                 if (!map.has(key)) {
                     map.set(key, []);
                 }
@@ -369,7 +506,7 @@ export function instrumentSetupForSingleStep(
         const resolveDocLocForStep = (step: StepTarget) => {
             if (!docLookup) return null;
             const { map, normalizeSnippet, usage } = docLookup;
-            const key = `${step.nodeType}::${normalizeSnippet(step.snippet || '')}::${step.functionName || ''}`;
+            const key = `${step.phase}::${step.nodeType}::${normalizeSnippet(step.snippet || '')}::${step.functionName || ''}`;
             const matches = map.get(key);
             if (!matches || matches.length === 0) return null;
             const used = usage.get(key) || 0;
@@ -379,9 +516,8 @@ export function instrumentSetupForSingleStep(
         };
 
         const makeHighlightFromStep = (step: StepTarget) => {
-            const docLoc = resolveDocLocForStep(step);
-            const useLoc = docLoc && typeof docLoc.line === 'number' ? docLoc : step.loc;
-            const alreadyNormalized = !!docLoc;
+            const useLoc = step.loc;
+            const alreadyNormalized = false;
             const line = typeof useLoc?.line === 'number' ? useLoc.line : 1;
             const column = typeof useLoc?.column === 'number' ? useLoc.column : 1;
             const endLine = typeof useLoc?.endLine === 'number' ? useLoc.endLine : line;
@@ -394,14 +530,23 @@ export function instrumentSetupForSingleStep(
                         b.literal(column),
                         b.literal(endLine),
                         b.literal(endColumn),
-                        alreadyNormalized ? b.literal(true) : b.literal(false)
+                        alreadyNormalized ? b.literal(true) : b.literal(false),
+                        b.literal(step.id)
                     ]
                 )
             );
         };
         const makeAwaitStep = () =>
             b.ifStatement(
-                b.unaryExpression('!', b.memberExpression(b.identifier('window'), b.identifier('__liveP5SteppingDone'))),
+                b.logicalExpression('&&',
+                    b.unaryExpression('!', b.memberExpression(b.identifier('window'), b.identifier('__liveP5SteppingDone'))),
+                    b.unaryExpression('!',
+                        b.logicalExpression('&&',
+                            b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueMode')),
+                            b.unaryExpression('!', b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinuePauseHere')))
+                        )
+                    )
+                ),
                 b.blockStatement([
                     b.expressionStatement(
                         b.awaitExpression(b.callExpression(b.identifier('__waitStep'), []))
@@ -415,6 +560,66 @@ export function instrumentSetupForSingleStep(
                     typeof count === 'number' ? [b.literal(count)] : []
                 )
             );
+        const makeStepIntoGuard = (callStep: StepTarget, _calleeFirstStep: StepTarget) =>
+            b.ifStatement(
+                b.binaryExpression('===',
+                    b.memberExpression(b.identifier('window'), b.identifier('__liveP5StepIntoTargetStepId')),
+                    b.literal(callStep.id)
+                ),
+                b.blockStatement([
+                    b.expressionStatement(
+                        b.assignmentExpression('=',
+                            b.memberExpression(b.identifier('window'), b.identifier('__liveP5StepIntoTargetStepId')),
+                            b.literal(0)
+                        )
+                    ),
+                    b.expressionStatement(
+                        b.assignmentExpression('=',
+                            b.memberExpression(b.identifier('window'), b.identifier('__liveP5StepIntoActive')),
+                            b.literal(true)
+                        )
+                    )
+                ])
+            );
+        const resolveStepIntoTargetForStatement = (stmt: any): StepTarget | null => {
+            try {
+                if (!stmt) return null;
+
+                const extractCallCalleeName = (expr: any): string | null => {
+                    if (!expr) return null;
+                    if (expr.type === 'AwaitExpression') {
+                        return extractCallCalleeName(expr.argument);
+                    }
+                    if (expr.type !== 'CallExpression') return null;
+                    const callee = expr.callee;
+                    if (!callee || callee.type !== 'Identifier') return null;
+                    return String(callee.name);
+                };
+
+                let calleeName: string | null = null;
+                if (stmt.type === 'ExpressionStatement') {
+                    calleeName = extractCallCalleeName(stmt.expression);
+                } else if (stmt.type === 'VariableDeclaration') {
+                    const decls = Array.isArray(stmt.declarations) ? stmt.declarations : [];
+                    for (const d of decls) {
+                        const name = extractCallCalleeName(d && d.init ? d.init : null);
+                        if (name) {
+                            calleeName = name;
+                            break;
+                        }
+                    }
+                } else if (stmt.type === 'ReturnStatement') {
+                    calleeName = extractCallCalleeName(stmt.argument);
+                }
+
+                if (!calleeName) return null;
+                const fnSteps = functionStepsByName.get(calleeName);
+                if (!fnSteps || fnSteps.length === 0) return null;
+                return fnSteps[0] || null;
+            } catch {
+                return null;
+            }
+        };
 
         // Insert helpers at the very top of the program.
         (ast.program as any).body = [...helpers, ...topLevelBody];
@@ -448,7 +653,17 @@ export function instrumentSetupForSingleStep(
                             setFrameWaitExpr(true)
                         ]),
                         b.blockStatement([
-                            b.expressionStatement(b.awaitExpression(b.callExpression(b.identifier('__waitStep'), []))),
+                            b.ifStatement(
+                                b.unaryExpression('!',
+                                    b.logicalExpression('&&',
+                                        b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueMode')),
+                                        b.unaryExpression('!', b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinuePauseHere')))
+                                    )
+                                ),
+                                b.blockStatement([
+                                    b.expressionStatement(b.awaitExpression(b.callExpression(b.identifier('__waitStep'), [])))
+                                ])
+                            ),
                             setFrameWaitExpr(true)
                         ])
                     );
@@ -488,9 +703,46 @@ export function instrumentSetupForSingleStep(
                 const isCustomFunction = node.id.name && asyncFunctionNames.has(node.id.name);
                 const injectIntoStatements = (stmts: any[], inLoop: boolean = false): any[] => {
                     const result: any[] = [];
+                    const awaitCustomCallsInStatement = (stmt: any) => {
+                        if (!stmt || asyncFunctionNames.size === 0) return;
+                        try {
+                            recast.types.visit(stmt, {
+                                visitFunctionDeclaration(p) {
+                                    // Do not rewrite inside nested declarations here.
+                                    return false;
+                                },
+                                visitFunctionExpression(p) {
+                                    return false;
+                                },
+                                visitArrowFunctionExpression(p) {
+                                    return false;
+                                },
+                                visitAwaitExpression(p) {
+                                    // Already awaited; keep as is.
+                                    this.traverse(p);
+                                },
+                                visitCallExpression(p) {
+                                    const call: any = p.value;
+                                    const cal = call && call.callee;
+                                    if (cal && cal.type === 'Identifier' && asyncFunctionNames.has(cal.name)) {
+                                        const parent = p.parent && p.parent.value ? p.parent.value : null;
+                                        if (!parent || parent.type !== 'AwaitExpression') {
+                                            const awaited = b.awaitExpression(call);
+                                            awaited.loc = call.loc;
+                                            p.replace(awaited as any);
+                                            return false;
+                                        }
+                                    }
+                                    this.traverse(p);
+                                }
+                            });
+                        } catch { }
+                    };
                     for (const stmt of stmts) {
                         if (!stmt) continue;
                         const postActions: any[] = [];
+
+                        awaitCustomCallsInStatement(stmt);
 
                         if (asyncFunctionNames.size > 0) {
                             if (stmt.type === 'ExpressionStatement' && stmt.expression) {
@@ -513,13 +765,38 @@ export function instrumentSetupForSingleStep(
                                         stmt.argument = awaitedReturn;
                                     }
                                 }
+                            } else if (stmt.type === 'VariableDeclaration') {
+                                const decls = Array.isArray((stmt as any).declarations) ? (stmt as any).declarations : [];
+                                for (const d of decls) {
+                                    if (!d || !d.init || d.init.type !== 'CallExpression') continue;
+                                    const cal = d.init.callee;
+                                    if (cal && cal.type === 'Identifier' && asyncFunctionNames.has(cal.name)) {
+                                        const originalInit = d.init;
+                                        const awaitedInit = b.awaitExpression(originalInit);
+                                        awaitedInit.loc = originalInit.loc;
+                                        d.init = awaitedInit;
+                                    }
+                                }
                             }
                         }
                         const execLoc = getExecutableLoc(stmt);
                         const loc = execLoc && execLoc.start ? execLoc.start : null;
                         const match = loc ? phaseSteps.find(s => s.loc.line === loc.line && s.loc.column - 1 === loc.column) : undefined;
                         if (match) {
-                            result.push(makeHighlightFromStep(match));
+                            const guardedFunctionStep = isCustomFunction
+                                ? b.ifStatement(
+                                    b.memberExpression(b.identifier('window'), b.identifier('__liveP5StepIntoActive')),
+                                    b.blockStatement([
+                                        makeHighlightFromStep(match),
+                                        makeAwaitStep()
+                                    ])
+                                )
+                                : null;
+                            if (guardedFunctionStep) {
+                                result.push(guardedFunctionStep);
+                            } else {
+                                result.push(makeHighlightFromStep(match));
+                            }
                             const isLastPhaseStep = !!(lastStep && match.loc.line === lastStep.loc.line && match.loc.column === lastStep.loc.column);
                             const isLoopStmt = (
                                 stmt.type === 'ForStatement' || stmt.type === 'ForInStatement' || stmt.type === 'ForOfStatement'
@@ -528,7 +805,9 @@ export function instrumentSetupForSingleStep(
                             const isEffectiveLast = isLastPhaseStep && !(inLoop || isLoopStmt);
                             if (isEffectiveLast) {
                                 // Last step: wait once more, then clear highlight automatically.
-                                result.push(makeAwaitStep());
+                                if (!guardedFunctionStep) {
+                                    result.push(makeAwaitStep());
+                                }
                                 if (node.id.name === 'setup') {
                                     postActions.push(markSetupDoneExpr());
                                     postActions.push(setFrameWaitExpr(false));
@@ -569,7 +848,14 @@ export function instrumentSetupForSingleStep(
                                     _insertedFinalClear = true;
                                 }
                             } else {
-                                result.push(makeAwaitStep());
+                                if (!guardedFunctionStep) {
+                                    result.push(makeAwaitStep());
+                                }
+                            }
+
+                            const stepIntoTarget = resolveStepIntoTargetForStatement(stmt);
+                            if (stepIntoTarget) {
+                                result.push(makeStepIntoGuard(match, stepIntoTarget));
                             }
                         }
 
@@ -586,7 +872,7 @@ export function instrumentSetupForSingleStep(
                                         } else if (expr.type === 'UpdateExpression') {
                                             if (expr.argument && expr.argument.type === 'Identifier') identName = expr.argument.name;
                                         }
-                                        if (identName) {
+                                        if (identName && shouldPostLiveUpdate(identName)) {
                                             const valueExpr = b.identifier(identName);
                                             const postMsg = b.tryStatement(
                                                 b.blockStatement([
@@ -649,6 +935,7 @@ export function instrumentSetupForSingleStep(
                                     for (const d of decls) {
                                         if (d && d.id && d.id.type === 'Identifier') {
                                             const name = d.id.name;
+                                            if (!shouldPostLiveUpdate(name)) continue;
                                             // Prefer the identifier value itself (captures initialized local or global value immediately after declaration).
                                             // Fallback to window[name] only if identifier not accessible (wrapped in try/catch in runtime).
                                             const valueExpr = b.identifier(name);
@@ -749,6 +1036,15 @@ export function instrumentSetupForSingleStep(
                 } else if (node.id.name === 'draw') {
                     node.body.body.push(setFrameWaitExpr(false));
                     node.body.body.push(setFrameInProgressExpr(false));
+                } else if (isCustomFunction) {
+                    node.body.body.push(
+                        b.expressionStatement(
+                            b.assignmentExpression('=',
+                                b.memberExpression(b.identifier('window'), b.identifier('__liveP5StepIntoActive')),
+                                b.literal(false)
+                            )
+                        )
+                    );
                 }
                 this.traverse(path);
                 return false;

@@ -1628,6 +1628,9 @@ function runUserSketch(code){
   window._p5ErrorLogged = false;
   window._p5SetupDone = false;
   window._p5PostedAfterSetup = false;
+  // Reset cached background replay state to avoid stale/no-arg background() calls after debug transitions.
+  window._p5UserBackground = false;
+  window._p5LastBackgroundArgs = null;
   const pendingLoopState = (typeof window._p5PendingLoopPaused === 'boolean')
     ? window._p5PendingLoopPaused
     : (typeof window._p5LoopPaused === 'boolean' ? window._p5LoopPaused : false);
@@ -1806,10 +1809,53 @@ waitForP5AndRunSketch();
 
 // Toolbar buttons removed; actions triggered via VS Code title bar commands.
 
+if (typeof window._p5FpsIndicatorRaf !== 'number') {
+  window._p5FpsIndicatorRaf = 0;
+}
+window._p5LastFpsIndicatorUpdateAt = 0;
+function updateFpsIndicator(force) {
+  try {
+    const el = document.getElementById('fps-indicator');
+    if (!el) return;
+    const isVisible = !(el.style && el.style.display === 'none');
+    if (!isVisible) return;
+    const now = (typeof performance !== 'undefined' && performance && typeof performance.now === 'function')
+      ? performance.now()
+      : Date.now();
+    if (!force && window._p5LastFpsIndicatorUpdateAt && (now - window._p5LastFpsIndicatorUpdateAt) < 250) {
+      return;
+    }
+    window._p5LastFpsIndicatorUpdateAt = now;
+    let fpsValue = Number.NaN;
+    const inst = window._p5Instance;
+    if (inst) {
+      if (typeof inst.frameRate === 'function') {
+        fpsValue = Number(inst.frameRate());
+      } else if (typeof inst._frameRate === 'number') {
+        fpsValue = Number(inst._frameRate);
+      }
+    }
+    el.textContent = Number.isFinite(fpsValue) && fpsValue >= 0
+      ? ('FPS: ' + fpsValue.toFixed(1))
+      : 'FPS: --';
+  } catch {}
+}
+function tickFpsIndicator() {
+  try { updateFpsIndicator(false); } catch {}
+  try { window._p5FpsIndicatorRaf = requestAnimationFrame(tickFpsIndicator); } catch {}
+}
+try {
+  if (window._p5FpsIndicatorRaf) {
+    cancelAnimationFrame(window._p5FpsIndicatorRaf);
+  }
+} catch {}
+try { window._p5FpsIndicatorRaf = requestAnimationFrame(tickFpsIndicator); } catch {}
+
 window.addEventListener("resize",()=>{ 
   if(window._p5Instance?._renderer && window._p5UserAutoFill){
     window._p5Instance.resizeCanvas(window.innerWidth,window.innerHeight);
-    const bgArgs = window._p5LastBackgroundArgs || [255];
+    const hasValidBgArgs = Array.isArray(window._p5LastBackgroundArgs) && window._p5LastBackgroundArgs.length > 0;
+    const bgArgs = hasValidBgArgs ? window._p5LastBackgroundArgs : [255];
     if(window._p5UserBackground) window._p5Instance.background(...bgArgs);
   }
 });
@@ -1818,6 +1864,18 @@ if (typeof window._p5LoopPaused !== 'boolean') {
   window._p5LoopPaused = false;
 }
 window._p5PendingLoopPaused = undefined;
+window._p5FastContinueEnabled = false;
+window._p5FastContinuePumping = false;
+window._p5FastContinueTimer = null;
+window.__liveP5ContinueMode = false;
+window.__liveP5ContinuePauseHere = false;
+window.__liveP5ContinueBreakpoints = {};
+window.__liveP5ContinueBreakpointSteps = {};
+window.__liveP5ContinueHasStepTargets = false;
+window.__liveP5ContinueSkipStepId = 0;
+window.__liveP5ContinueSkipDone = true;
+window.__liveP5StepIntoTargetStepId = 0;
+window.__liveP5StepIntoActive = false;
 function applyDrawLoopState(){
   try {
     if (!window._p5Instance) return;
@@ -1827,6 +1885,92 @@ function applyDrawLoopState(){
       if (typeof window._p5Instance.loop === 'function') { window._p5Instance.loop(); }
     }
   } catch {}
+}
+
+function pumpFastContinue(){
+  if (window._p5FastContinuePumping) return;
+  window._p5FastContinuePumping = true;
+  const tick = () => {
+    try {
+      if (!window._p5FastContinueEnabled) {
+        if (window._p5FastContinueTimer) {
+          try { clearTimeout(window._p5FastContinueTimer); } catch {}
+          window._p5FastContinueTimer = null;
+        }
+        window._p5FastContinuePumping = false;
+        return;
+      }
+      // Advance in batches, then yield so stop/toggle messages stay responsive.
+      let budget = 256;
+      while (
+        budget > 0
+        && window._p5FastContinueEnabled
+        && !window.__liveP5ContinuePauseHere
+        && typeof window.__liveP5StepAdvance === 'function'
+        && window.__liveP5StepResolve
+      ) {
+        window.__liveP5StepAdvance();
+        budget--;
+      }
+    } catch {}
+    try { window._p5FastContinueTimer = setTimeout(tick, 0); } catch { window._p5FastContinuePumping = false; }
+  };
+  try { window._p5FastContinueTimer = setTimeout(tick, 0); } catch { window._p5FastContinuePumping = false; }
+}
+
+function setFastContinueEnabled(enabled, breakpointLines, breakpointStepIds, skipStepId){
+  if (Array.isArray(breakpointLines)) {
+    const next = {};
+    for (let i = 0; i < breakpointLines.length; i++) {
+      const n = Number(breakpointLines[i]);
+      if (Number.isFinite(n) && n >= 1) {
+        next[Math.trunc(n)] = true;
+      }
+    }
+    window.__liveP5ContinueBreakpoints = next;
+  }
+  if (Array.isArray(breakpointStepIds)) {
+    const nextSteps = {};
+    for (let i = 0; i < breakpointStepIds.length; i++) {
+      const n = Number(breakpointStepIds[i]);
+      if (Number.isFinite(n) && n >= 1) {
+        nextSteps[Math.trunc(n)] = true;
+      }
+    }
+    window.__liveP5ContinueBreakpointSteps = nextSteps;
+    window.__liveP5ContinueHasStepTargets = Object.keys(nextSteps).length > 0;
+  } else {
+    window.__liveP5ContinueBreakpointSteps = {};
+    window.__liveP5ContinueHasStepTargets = false;
+  }
+  window._p5FastContinueEnabled = !!enabled;
+  window.__liveP5ContinueMode = !!enabled;
+  if (window._p5FastContinueEnabled) {
+    window.__liveP5ContinuePauseHere = false;
+    const skipId = Number(skipStepId);
+    if (Number.isFinite(skipId) && skipId >= 1) {
+      window.__liveP5ContinueSkipStepId = Math.trunc(skipId);
+      window.__liveP5ContinueSkipDone = false;
+    } else {
+      window.__liveP5ContinueSkipStepId = 0;
+      window.__liveP5ContinueSkipDone = true;
+    }
+  }
+  if (!window._p5FastContinueEnabled) {
+    window.__liveP5ContinuePauseHere = false;
+    window.__liveP5ContinueBreakpointSteps = {};
+    window.__liveP5ContinueHasStepTargets = false;
+    window.__liveP5ContinueSkipStepId = 0;
+    window.__liveP5ContinueSkipDone = true;
+    if (window._p5FastContinueTimer) {
+      try { clearTimeout(window._p5FastContinueTimer); } catch {}
+      window._p5FastContinueTimer = null;
+    }
+    window._p5FastContinuePumping = false;
+  }
+  if (window._p5FastContinueEnabled) {
+    pumpFastContinue();
+  }
 }
 
 window.addEventListener("message", e => {
@@ -1884,6 +2028,9 @@ window.addEventListener("message", e => {
     case "invokeSingleStep":
       vscode.postMessage({type:"single-step-clicked"});
       break;
+    case "invokeStepInto":
+      vscode.postMessage({type:"step-into-clicked"});
+      break;
     case "pauseDrawLoop":
       window._p5LoopPaused = true;
       applyDrawLoopState();
@@ -1900,6 +2047,7 @@ window.addEventListener("message", e => {
       try { vscode.postMessage({ type: 'captureVisibilityChanged', visible: !!window._p5CaptureVisible }); } catch {}
       break;
     case "reload":
+      setFastContinueEnabled(false);
       // Always reset capture UI/timer on reload so the panel timer shows fresh
       try { if (typeof window._resetCaptureUIAndTimer === 'function') window._resetCaptureUIAndTimer(); } catch {}
       // Clear stepping state so the draw loop cannot remain frozen after stopping debugging.
@@ -1909,6 +2057,8 @@ window.addEventListener("message", e => {
         window.__liveP5FrameCounter = 0;
         window.__liveP5StepResolve = null;
         window.__liveP5StepAdvance = null;
+        window.__liveP5StepIntoTargetStepId = 0;
+        window.__liveP5StepIntoActive = false;
         window.__liveP5WaitStep = null;
         window.__liveP5Highlight = null;
         window.__liveP5ClearHighlight = null;
@@ -1930,6 +2080,8 @@ window.addEventListener("message", e => {
           window.__liveP5FrameCounter = 0;
           window.__liveP5StepResolve = null;
           window.__liveP5StepAdvance = null;
+          window.__liveP5StepIntoTargetStepId = 0;
+          window.__liveP5StepIntoActive = false;
           window.__liveP5Stepping = false;
         } catch {}
         try {
@@ -1969,6 +2121,8 @@ window.addEventListener("message", e => {
           window.__liveP5FrameCounter = 0;
           window.__liveP5StepResolve = null;
           window.__liveP5StepAdvance = null;
+          window.__liveP5StepIntoTargetStepId = 0;
+          window.__liveP5StepIntoActive = false;
           window.__liveP5Stepping = false;
         } catch {}
         try {
@@ -1980,12 +2134,15 @@ window.addEventListener("message", e => {
       }
       break;
     case "stop":
+      setFastContinueEnabled(false);
       try {
         window.__liveP5Gate = null;
         window.__liveP5DrawBusy = false;
         window.__liveP5FrameCounter = 0;
         window.__liveP5StepResolve = null;
         window.__liveP5StepAdvance = null;
+        window.__liveP5StepIntoTargetStepId = 0;
+        window.__liveP5StepIntoActive = false;
         window.__liveP5Stepping = false;
       } catch {}
       try {
@@ -2029,6 +2186,15 @@ window.addEventListener("message", e => {
           window.__liveP5ClearHighlight();
         }
       } catch (e) { }
+      break;
+    case 'set-step-into-target':
+      try {
+        const n = Number(data.stepId);
+        window.__liveP5StepIntoTargetStepId = (Number.isFinite(n) && n >= 1) ? Math.trunc(n) : 0;
+      } catch {}
+      break;
+    case 'set-fast-continue':
+      try { setFastContinueEnabled(!!data.enabled, data.breakpointLines, data.breakpointStepIds, data.skipStepId); } catch {}
       break;
     case 'setGlobalVars':
       if (typeof data.debounceDelay === 'number') {
@@ -2109,7 +2275,11 @@ window.addEventListener("message", e => {
         const el = document.getElementById('fps-indicator');
         if (el) {
           el.style.display = data.show ? 'block' : 'none';
-          if (!data.show) el.textContent = '';
+          if (data.show) {
+            updateFpsIndicator(true);
+          } else {
+            el.textContent = '';
+          }
         }
       } catch {}
       break;

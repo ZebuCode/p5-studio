@@ -19,7 +19,8 @@ export type WebviewToExtensionMessage =
     | { type: 'step-run-clicked' }
     | { type: 'continue-clicked' }
     | { type: 'single-step-clicked' }
-    | { type: 'highlightLine'; line: number }
+    | { type: 'step-into-clicked' }
+    | { type: 'highlightLine'; line: number; rawLine?: number; stepId?: number; virtualBreakpoint?: boolean }
     | { type: 'gotoErrorLine'; line: number; col?: number }
     | { type: 'clearHighlight'; final?: boolean }
     | { type: 'revealGlobals'; count?: number }
@@ -47,6 +48,8 @@ export type ExtensionToWebviewMessage =
     | { type: 'setGlobalVars'; variables: GlobalVar[]; readOnly?: boolean; suppressPanel?: boolean }
     | { type: 'requestGlobalsSnapshot' }
     | { type: 'step-advance' }
+    | { type: 'set-step-into-target'; stepId: number }
+    | { type: 'set-fast-continue'; enabled: boolean; breakpointLines?: number[]; breakpointStepIds?: number[]; skipStepId?: number }
     | { type: 'updateOverlayFontSize'; value: number }
     // Additional control/event messages used by the extension
     | { type: 'oscReceive'; address: string; args?: any[] }
@@ -55,6 +58,7 @@ export type ExtensionToWebviewMessage =
     | { type: 'invokeStepRun' }
     | { type: 'invokeContinue' }
     | { type: 'invokeSingleStep' }
+    | { type: 'invokeStepInto' }
     | { type: 'invokeReload'; preserveGlobals?: boolean }
     | { type: 'toggleCaptureVisibility' }
     | { type: 'pauseDrawLoop' }

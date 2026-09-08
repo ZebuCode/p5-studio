@@ -639,6 +639,12 @@ function normalizeForInput(type, v) {
     } catch { return ''; }
   }
   if (type === 'boolean') return !!v;
+  if (type === 'object') {
+    try { return JSON.stringify(v); }
+    catch {
+      try { return String(v); } catch { return '[object]'; }
+    }
+  }
   return (v === undefined || v === null) ? '' : String(v);
 }
 function sliderFieldKey(scope, name) {
