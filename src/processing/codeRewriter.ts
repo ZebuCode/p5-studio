@@ -342,6 +342,15 @@ export function rewriteUserCodeWithWindowGlobals(code: string, globals: { name: 
             (newFn as any).async = !!(originalStmt as any).async;
             stmt = newFn as any;
             newBody.push(stmt);
+            newBody.push(
+                recast.types.builders.expressionStatement(
+                    recast.types.builders.assignmentExpression(
+                        '=',
+                        recast.types.builders.memberExpression(recast.types.builders.identifier('window'), recast.types.builders.identifier('setup'), false),
+                        recast.types.builders.identifier('setup')
+                    )
+                )
+            );
             continue;
         }
 
@@ -354,11 +363,31 @@ export function rewriteUserCodeWithWindowGlobals(code: string, globals: { name: 
             stmt = newFn as any;
         }
         newBody.push(stmt);
+        if (stmt.type === 'FunctionDeclaration' && stmt.id && stmt.id.name) {
+            newBody.push(
+                recast.types.builders.expressionStatement(
+                    recast.types.builders.assignmentExpression(
+                        '=',
+                        recast.types.builders.memberExpression(recast.types.builders.identifier('window'), recast.types.builders.identifier(stmt.id.name), false),
+                        recast.types.builders.identifier(stmt.id.name)
+                    )
+                )
+            );
+        }
     }
 
     if (!setupFound) {
         const setupBody = [...globalAssignments, recast.types.builders.expressionStatement(recast.types.builders.assignmentExpression('=', recast.types.builders.memberExpression(recast.types.builders.identifier('window'), recast.types.builders.identifier('_p5SetupDone'), false), recast.types.builders.literal(true)))];
         newBody.push(recast.types.builders.functionDeclaration(recast.types.builders.identifier('setup'), [], recast.types.builders.blockStatement(setupBody)));
+        newBody.push(
+            recast.types.builders.expressionStatement(
+                recast.types.builders.assignmentExpression(
+                    '=',
+                    recast.types.builders.memberExpression(recast.types.builders.identifier('window'), recast.types.builders.identifier('setup'), false),
+                    recast.types.builders.identifier('setup')
+                )
+            )
+        );
     }
 
     (ast as any).program.body = newBody;
