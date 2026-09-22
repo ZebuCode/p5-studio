@@ -2,7 +2,7 @@
   "name": "p5-studio",
   "displayName": "P5 Studio",
   "description": "Live code p5js in VS Code",
-  "version": "1.2.5",
+  "version": "1.2.7",
   "icon": "images/ICON.png",
   "author": {
     "name": "peterdickx"

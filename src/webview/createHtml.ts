@@ -2204,11 +2204,13 @@ window.addEventListener("message", e => {
       const suppressPanel = !!data.suppressPanel;
       // Store types and update timestamps for later use before rendering
       window._p5GlobalVarTypes = {};
+      window._p5GlobalVarReadonly = {};
       if (!window._p5VarUpdateTimes) window._p5VarUpdateTimes = {};
       (data.variables || []).forEach((v) => {
         if (!v || !v.name) return;
         const incomingType = v.type || (Array.isArray(v.value) ? 'array' : typeof v.value);
         window._p5GlobalVarTypes[v.name] = incomingType;
+        window._p5GlobalVarReadonly[v.name] = !!v.readonly;
         if (typeof v.updatedAt === 'number') {
           window._p5VarUpdateTimes[v.name] = v.updatedAt;
         }
@@ -2374,10 +2376,18 @@ function updateGlobalVarInSketch(name, value) {
   // Always set window[name]; rewritten code references window.<name>
   function isReadOnlyGlobal(targetName) {
     try {
+      if (window._p5GlobalVarReadonly && window._p5GlobalVarReadonly[targetName] === true) {
+        return true;
+      }
       const d = Object.getOwnPropertyDescriptor(window, targetName);
       if (!d) return false;
-      // Const-backed globals are exposed through accessor descriptors with a throwing setter.
-      if (typeof d.get === 'function' && typeof d.set === 'function') return true;
+      // Accessor-backed mutable globals are allowed; only detect explicit const-like setters.
+      if (typeof d.get === 'function' && typeof d.set === 'function') {
+        try {
+          const setterSource = String(d.set || '');
+          if (setterSource.indexOf('Assignment to constant variable.') !== -1) return true;
+        } catch {}
+      }
       if ('writable' in d && d.writable === false) return true;
       return false;
     } catch {
@@ -2508,6 +2518,11 @@ function updateGlobalVarInSketch(name, value) {
     window._p5VarUpdateTimes[name] = Date.now();
   }
   const desc = Object.getOwnPropertyDescriptor(window, name);
+        // If globals are already bridged via accessor (from code rewrite), preserve that bridge.
+        if (desc && typeof desc.get === 'function' && typeof desc.set === 'function') {
+          window._p5VarWatchInstalled[name] = true;
+          return;
+        }
         // Define accessor only if configurable or not defined on window, to avoid errors
         if (!desc || desc.configurable !== false) {
           Object.defineProperty(window, name, {

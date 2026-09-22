@@ -321,7 +321,51 @@ export function rewriteUserCodeWithWindowGlobals(code: string, globals: { name: 
                             )
                         ));
                     } else {
-                        newBody.push(recast.types.builders.expressionStatement(recast.types.builders.assignmentExpression('=', recast.types.builders.memberExpression(recast.types.builders.identifier('window'), recast.types.builders.identifier(decl.id.name), false), recast.types.builders.identifier(decl.id.name))));
+                        newBody.push(recast.types.builders.expressionStatement(
+                            recast.types.builders.callExpression(
+                                recast.types.builders.memberExpression(
+                                    recast.types.builders.identifier('Object'),
+                                    recast.types.builders.identifier('defineProperty'),
+                                    false
+                                ),
+                                [
+                                    recast.types.builders.identifier('window'),
+                                    recast.types.builders.literal(decl.id.name),
+                                    recast.types.builders.objectExpression([
+                                        recast.types.builders.property('init', recast.types.builders.identifier('configurable'), recast.types.builders.literal(true)),
+                                        recast.types.builders.property('init', recast.types.builders.identifier('enumerable'), recast.types.builders.literal(true)),
+                                        recast.types.builders.property(
+                                            'init',
+                                            recast.types.builders.identifier('get'),
+                                            recast.types.builders.functionExpression(
+                                                null,
+                                                [],
+                                                recast.types.builders.blockStatement([
+                                                    recast.types.builders.returnStatement(recast.types.builders.identifier(decl.id.name))
+                                                ])
+                                            )
+                                        ),
+                                        recast.types.builders.property(
+                                            'init',
+                                            recast.types.builders.identifier('set'),
+                                            recast.types.builders.functionExpression(
+                                                null,
+                                                [recast.types.builders.identifier('_value')],
+                                                recast.types.builders.blockStatement([
+                                                    recast.types.builders.expressionStatement(
+                                                        recast.types.builders.assignmentExpression(
+                                                            '=',
+                                                            recast.types.builders.identifier(decl.id.name),
+                                                            recast.types.builders.identifier('_value')
+                                                        )
+                                                    )
+                                                ])
+                                            )
+                                        )
+                                    ])
+                                ]
+                            )
+                        ));
                     }
                 }
             }
@@ -428,6 +472,41 @@ export function rewriteUserCodeWithWindowGlobals(code: string, globals: { name: 
         return !!(parent && parent.type === 'Property' && parent.key === path.value && !parent.computed);
     }
 
+    function isInsideWindowDefinePropertyAccessor(path: any, name: string): boolean {
+        let sawAccessorProperty = false;
+        let p: any = path;
+        while (p && p.parentPath) {
+            const parentPath = p.parentPath;
+            const v = parentPath.value;
+            if (!v) break;
+
+            if (v.type === 'Property' && (v.key?.name === 'get' || v.key?.name === 'set') && v.value === p.value) {
+                sawAccessorProperty = true;
+            }
+
+            if (sawAccessorProperty && v.type === 'CallExpression') {
+                const callee = v.callee;
+                const args = Array.isArray(v.arguments) ? v.arguments : [];
+                const isDefineProperty = !!(
+                    callee
+                    && callee.type === 'MemberExpression'
+                    && callee.object?.type === 'Identifier'
+                    && callee.object.name === 'Object'
+                    && callee.property?.type === 'Identifier'
+                    && callee.property.name === 'defineProperty'
+                );
+                const isWindowTarget = !!(args[0] && args[0].type === 'Identifier' && args[0].name === 'window');
+                const hasMatchingName = !!(args[1] && args[1].type === 'Literal' && args[1].value === name);
+                if (isDefineProperty && isWindowTarget && hasMatchingName) {
+                    return true;
+                }
+            }
+
+            p = parentPath;
+        }
+        return false;
+    }
+
     function collectBoundNamesFromPattern(pattern: any, out: Set<string>) {
         if (!pattern) return;
         if (pattern.type === 'Identifier') { out.add(pattern.name); return; }
@@ -481,8 +560,9 @@ export function rewriteUserCodeWithWindowGlobals(code: string, globals: { name: 
             const isNonComputedProperty = !!(path.parentPath && path.parentPath.value && path.parentPath.value.type === 'MemberExpression' && (path.parentPath.value as any).property === path.value && !(path.parentPath.value as any).computed);
             const bindingScope = (path.scope && typeof path.scope.lookup === 'function') ? path.scope.lookup(name) : null;
             const isLocallyBound = !!(bindingScope && !bindingScope.isGlobal);
+            const isAccessorBridgeIdentifier = isInsideWindowDefinePropertyAccessor(path, name);
             // Do not rewrite identifiers that are parameters, binding patterns, shadowed names, or locally scoped helpers.
-            if (isFunctionParam(path) || isInBindingPattern(path) || isShadowedByParams(path, name) || isLocallyBound || isNonComputedProperty || isObjectPropertyKey(path)) {
+            if (isFunctionParam(path) || isInBindingPattern(path) || isShadowedByParams(path, name) || isLocallyBound || isNonComputedProperty || isObjectPropertyKey(path) || isAccessorBridgeIdentifier) {
                 this.traverse(path);
                 return;
             }

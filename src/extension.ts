@@ -1441,6 +1441,10 @@ export function activate(context: vscode.ExtensionContext) {
             await restore.moveToOrderEnd(editor.document.fileName);
           } catch { }
           activeP5Panel = panel;
+          // First-open fix: sync side panels after active panel is set.
+          // Earlier sync calls can run before this assignment and target no/old panel.
+          updateVariablesPanel();
+          updateTriggersPanel();
           try {
             panel.onDidChangeViewState(() => {
               try {
