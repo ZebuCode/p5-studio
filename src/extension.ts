@@ -889,7 +889,17 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(watcher.onDidChange(() => updateP5ProjectContext()));
     context.subscriptions.push(watcher);
   } catch { /* ignore */ }
-  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => updateP5ProjectContext()));
+  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
+    updateP5ProjectContext();
+    (async () => {
+      try {
+        await refreshJsconfigIfMarkerPresent(context);
+        await vscode.commands.executeCommand('typescript.restartTsServer');
+      } catch {
+        // ignore workspace-switch refresh errors
+      }
+    })();
+  }));
 
   (async () => { try { await updateJsconfigTimestamps(); } catch { } })();
 
