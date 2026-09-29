@@ -23,10 +23,22 @@ export async function refreshJsconfigIfMarkerPresent(context: vscode.ExtensionCo
     if (!workspaceFolder) return;
     try {
         const markerPath = path.join(workspaceFolder.uri.fsPath, '.p5');
-        if (fs.existsSync(markerPath)) {
+        const jsconfigPath = path.join(workspaceFolder.uri.fsPath, 'jsconfig.json');
+        const hasMarker = fs.existsSync(markerPath);
+        let hasP5ProjectType = false;
+        if (fs.existsSync(jsconfigPath)) {
+            try {
+                const raw = fs.readFileSync(jsconfigPath, 'utf8');
+                const parsed = JSON.parse(raw);
+                const projectType = typeof parsed?.projectType === 'string' ? parsed.projectType.toLowerCase() : '';
+                hasP5ProjectType = projectType === 'p5' || projectType === 'p5js';
+            } catch {
+                // ignore parse errors and fall back to marker detection
+            }
+        }
+        if (hasMarker || hasP5ProjectType) {
             // Try to hide the marker file on Windows if it's visible
-            hideFileIfSupported(markerPath);
-            const jsconfigPath = path.join(workspaceFolder.uri.fsPath, 'jsconfig.json');
+            if (hasMarker) hideFileIfSupported(markerPath);
             // Delete existing jsconfig.json if present
             if (fs.existsSync(jsconfigPath)) {
                 try { fs.unlinkSync(jsconfigPath); } catch { /* ignore */ }
@@ -50,14 +62,16 @@ export async function refreshJsconfigIfMarkerPresent(context: vscode.ExtensionCo
             const resolvedHelperRJ = p5helperCandidatesRJ.find(p => { try { return fs.existsSync(p); } catch { return false; } });
             const jsconfig = {
                 createdAt: toLocalISOString(now2),
+                projectType: 'p5js',
                 include: ((): string[] => {
                     const base = [
-                        '*.js',
-                        '**/*.js',
-                        '*.ts',
-                        '**/.ts',
-                        'common/*.js',
-                        'import/*.js',
+                        'sketches/**/*.js',
+                        'include/**/*.js',
+                        'import/**/*.js',
+                        'common/**/*.js',
+                        'include/**/*.d.ts',
+                        'import/**/*.d.ts',
+                        'common/**/*.d.ts',
                     ];
                     if (resolvedGlobalRJ) base.push(resolvedGlobalRJ);
                     if (resolvedHelperRJ) base.push(resolvedHelperRJ);
