@@ -2100,8 +2100,9 @@ window.addEventListener("message", e => {
   let codeNoGlobals = String(data.code);
         if (window._p5GlobalVarTypes) {
           Object.keys(window._p5GlobalVarTypes).forEach(name => {
-            // Remove lines like 'var x = ...;' or 'var x;' (with or without semicolon)
-            codeNoGlobals = codeNoGlobals.replace(new RegExp('^\\s*var\\s+'+name+'(\\s*=.*)?;?\\s*$', 'gm'), '');
+            // Keep accessor backing declarations (var x;) to avoid recursive getters.
+            // Only remove explicit initializer declarations when preserving runtime globals.
+            codeNoGlobals = codeNoGlobals.replace(new RegExp('^\\s*var\\s+'+name+'\\s*=.+;?\\s*$', 'gm'), '');
             // Remove lines like 'window.x = x;' (with or without semicolon)
             codeNoGlobals = codeNoGlobals.replace(new RegExp('^\\s*window\\\.'+name+'\\s*=\\s*' + name + ';?\\s*$', 'gm'), '');
           });

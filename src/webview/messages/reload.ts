@@ -234,7 +234,9 @@ export async function handleReloadClicked(
   let rewrittenCode = deps.rewriteUserCodeWithWindowGlobals(code, globals);
   if (params.preserveGlobals && globals.length > 0) {
     globals.forEach(g => {
-      rewrittenCode = rewrittenCode.replace(new RegExp('^\\s*var\\s+' + g.name + '(\\s*=.*)?;?\\s*$', 'gm'), '');
+      // Keep accessor backing declarations (`var x;`) to avoid recursive getters.
+      // Only strip explicit initializer declarations when preserving current runtime globals.
+      rewrittenCode = rewrittenCode.replace(new RegExp('^\\s*var\\s+' + g.name + '\\s*=.+;?\\s*$', 'gm'), '');
       rewrittenCode = rewrittenCode.replace(new RegExp('^\\s*window\\.' + g.name + '\\s*=\\s*' + g.name + ';?\\s*$', 'gm'), '');
     });
   }
