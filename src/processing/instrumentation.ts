@@ -703,6 +703,70 @@ export function instrumentSetupForSingleStep(
                 const isCustomFunction = node.id.name && asyncFunctionNames.has(node.id.name);
                 const injectIntoStatements = (stmts: any[], inLoop: boolean = false): any[] => {
                     const result: any[] = [];
+                    const makeLocalUpdatePost = (name: string) => {
+                        const safeName = String(name);
+                        return b.tryStatement(
+                            b.blockStatement([
+                                b.expressionStatement(
+                                    b.callExpression(
+                                        b.memberExpression(b.identifier('vscode'), b.identifier('postMessage')),
+                                        [b.objectExpression([
+                                            b.property('init', b.identifier('type'), b.literal('updateGlobalVar')),
+                                            b.property('init', b.identifier('scope'), b.literal('locals')),
+                                            b.property('init', b.identifier('name'), b.literal(safeName)),
+                                            b.property('init', b.identifier('value'), b.identifier(safeName))
+                                        ])]
+                                    )
+                                )
+                            ]),
+                            b.catchClause(b.identifier('_'), null, b.blockStatement([]))
+                        );
+                    };
+                    const collectLoopIdentifiers = (expr: any, out: Set<string>) => {
+                        if (!expr) return;
+                        if (expr.type === 'Identifier') {
+                            out.add(String(expr.name));
+                            return;
+                        }
+                        if (expr.type === 'UpdateExpression') {
+                            if (expr.argument && expr.argument.type === 'Identifier') out.add(String(expr.argument.name));
+                            return;
+                        }
+                        if (expr.type === 'AssignmentExpression') {
+                            if (expr.left && expr.left.type === 'Identifier') out.add(String(expr.left.name));
+                            return;
+                        }
+                        if (expr.type === 'SequenceExpression' && Array.isArray(expr.expressions)) {
+                            for (const part of expr.expressions) collectLoopIdentifiers(part, out);
+                        }
+                    };
+                    const collectForHeaderLocals = (stmt: any): string[] => {
+                        const names = new Set<string>();
+                        if (!stmt) return [];
+                        if (stmt.type === 'ForStatement') {
+                            const init = stmt.init;
+                            if (init && init.type === 'VariableDeclaration') {
+                                const decls = Array.isArray(init.declarations) ? init.declarations : [];
+                                for (const d of decls) {
+                                    if (d && d.id && d.id.type === 'Identifier') names.add(String(d.id.name));
+                                }
+                            } else {
+                                collectLoopIdentifiers(init, names);
+                            }
+                            collectLoopIdentifiers(stmt.update, names);
+                        } else if (stmt.type === 'ForInStatement' || stmt.type === 'ForOfStatement') {
+                            const left = stmt.left;
+                            if (left && left.type === 'VariableDeclaration') {
+                                const decls = Array.isArray(left.declarations) ? left.declarations : [];
+                                for (const d of decls) {
+                                    if (d && d.id && d.id.type === 'Identifier') names.add(String(d.id.name));
+                                }
+                            } else if (left && left.type === 'Identifier') {
+                                names.add(String(left.name));
+                            }
+                        }
+                        return Array.from(names);
+                    };
                     const awaitCustomCallsInStatement = (stmt: any) => {
                         if (!stmt || asyncFunctionNames.size === 0) return;
                         try {
@@ -741,6 +805,7 @@ export function instrumentSetupForSingleStep(
                     for (const stmt of stmts) {
                         if (!stmt) continue;
                         const postActions: any[] = [];
+                        let loopIterationPrelude: any[] | null = null;
 
                         awaitCustomCallsInStatement(stmt);
 
@@ -783,6 +848,10 @@ export function instrumentSetupForSingleStep(
                         const loc = execLoc && execLoc.start ? execLoc.start : null;
                         const match = loc ? phaseSteps.find(s => s.loc.line === loc.line && s.loc.column - 1 === loc.column) : undefined;
                         if (match) {
+                            const isLoopStmt = (
+                                stmt.type === 'ForStatement' || stmt.type === 'ForInStatement' || stmt.type === 'ForOfStatement'
+                                || stmt.type === 'WhileStatement' || stmt.type === 'DoWhileStatement'
+                            );
                             const guardedFunctionStep = isCustomFunction
                                 ? b.ifStatement(
                                     b.memberExpression(b.identifier('window'), b.identifier('__liveP5StepIntoActive')),
@@ -792,16 +861,16 @@ export function instrumentSetupForSingleStep(
                                     ])
                                 )
                                 : null;
-                            if (guardedFunctionStep) {
+                            if (isLoopStmt) {
+                                loopIterationPrelude = guardedFunctionStep
+                                    ? [guardedFunctionStep]
+                                    : [makeHighlightFromStep(match), makeAwaitStep()];
+                            } else if (guardedFunctionStep) {
                                 result.push(guardedFunctionStep);
                             } else {
                                 result.push(makeHighlightFromStep(match));
                             }
                             const isLastPhaseStep = !!(lastStep && match.loc.line === lastStep.loc.line && match.loc.column === lastStep.loc.column);
-                            const isLoopStmt = (
-                                stmt.type === 'ForStatement' || stmt.type === 'ForInStatement' || stmt.type === 'ForOfStatement'
-                                || stmt.type === 'WhileStatement' || stmt.type === 'DoWhileStatement'
-                            );
                             const isEffectiveLast = isLastPhaseStep && !(inLoop || isLoopStmt);
                             if (isEffectiveLast) {
                                 // Last step: wait once more, then clear highlight automatically.
@@ -848,7 +917,7 @@ export function instrumentSetupForSingleStep(
                                     _insertedFinalClear = true;
                                 }
                             } else {
-                                if (!guardedFunctionStep) {
+                                if (!guardedFunctionStep && !isLoopStmt) {
                                     result.push(makeAwaitStep());
                                 }
                             }
@@ -990,11 +1059,20 @@ export function instrumentSetupForSingleStep(
                             case 'ForOfStatement':
                             case 'WhileStatement':
                             case 'DoWhileStatement': {
+                                const headerLocals = collectForHeaderLocals(stmt);
                                 if (stmt.body) {
                                     const bodyNodes = (stmt.body.body && Array.isArray(stmt.body.body)) ? stmt.body.body : [stmt.body];
                                     const injectedBody = injectIntoStatements(bodyNodes, true);
-                                    if (Array.isArray(stmt.body.body)) stmt.body.body = injectedBody;
-                                    else stmt.body = injectedBody[0] || stmt.body;
+                                    const localPosts = headerLocals.map(name => makeLocalUpdatePost(name));
+                                    const prelude = loopIterationPrelude || [];
+                                    const nextBody = [...prelude, ...localPosts, ...injectedBody];
+                                    if (Array.isArray(stmt.body.body)) {
+                                        stmt.body.body = nextBody;
+                                    } else if (nextBody.length <= 1) {
+                                        stmt.body = nextBody[0] || stmt.body;
+                                    } else {
+                                        stmt.body = b.blockStatement(nextBody);
+                                    }
                                 }
                                 result.push(stmt);
                                 break;
@@ -1056,4 +1134,3 @@ export function instrumentSetupForSingleStep(
         return code;
     }
 }
-

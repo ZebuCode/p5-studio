@@ -21,6 +21,7 @@ export function hideFileIfSupported(filePath: string) {
 export async function refreshJsconfigIfMarkerPresent(context: vscode.ExtensionContext) {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     if (!workspaceFolder) return;
+    const clearInitStatus = vscode.window.setStatusBarMessage('Initializing P5 Studio');
     try {
         const markerPath = path.join(workspaceFolder.uri.fsPath, '.p5');
         const jsconfigPath = path.join(workspaceFolder.uri.fsPath, 'jsconfig.json');
@@ -85,6 +86,8 @@ export async function refreshJsconfigIfMarkerPresent(context: vscode.ExtensionCo
         }
     } catch (e) {
         console.warn('Failed to refresh jsconfig.json on activation:', e);
+    } finally {
+        clearInitStatus.dispose();
     }
 }
 

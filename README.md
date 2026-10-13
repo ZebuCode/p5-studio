@@ -33,6 +33,8 @@ Like this extension and want to support me? Buy me a coffee:
    - Automatically run stepping with configurable intervals.
    - Stop debugging at any time.
    - Visualize local variable values in the variables panel.
+   - Loop-header locals (for example `for (let i = 0; ...)`) are shown while stepping.
+   - Loop statements pause on their header for every iteration while stepping.
 - **Capture:** Record animations or graphics from the webview with a record button.
 - **Save images:¨** Right click on your canvas to copy or save the current image.
 - **Duplicate sketches:** Right click on a file and duplicate it.
@@ -92,7 +94,7 @@ All settings live under the `P5 Studio` namespace. Configure them from VS Code s
 | `P5Studio.osc.oscRemotePort` | number | `57120` | OSC destination port for outbound messages. |
 | `P5Studio.osc.oscLocalAddress` | string | `"127.0.0.1"` | OSC bind address for inbound messages (`0.0.0.0` allows LAN clients). |
 | `P5Studio.osc.oscLocalPort` | number | `57121` | OSC listening port for inbound messages. |
-| `P5Studio.blockly.enableBlockly` | boolean | `true` | Enable Blockly integration, exposing the Blockly button and context menu entry. |
+| `P5Studio.blockly.enableBlockly` | boolean | `false` | Enable Blockly integration, exposing the Blockly button and context menu entry. |
 | `P5Studio.blockly.blocklyTheme` | enum | `"auto"` | Theme applied to the Blockly panel (`auto` follows the VS Code theme). |
 | `P5Studio.debug.ShowDebugButton` | boolean | `true` | Show the beta Debug button that primes sketches for step execution. |
 | `P5Studio.debug.stepRunDelayMs` | number (≥ `0`) | `250` | Delay in milliseconds between Step-Run iterations. |
