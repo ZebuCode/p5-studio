@@ -81,6 +81,12 @@ function getReloadOnSave(): boolean {
     } catch { return true; }
 }
 
+function getShowSetupReloadButton(): boolean {
+    try {
+        return vscode.workspace.getConfiguration('P5Studio').get<boolean>('showSetupReloadButton', false) === true;
+    } catch { return false; }
+}
+
 function getStrictLevel(kind: 'Semicolon' | 'Undeclared' | 'NoVar' | 'LooseEquality'): StrictLevel {
     const cfg = vscode.workspace.getConfiguration('P5Studio');
     const key = `lint.Strict${kind}Warning` as const;
@@ -108,6 +114,12 @@ function getOscConfig() {
         remoteAddress: cfg.get<string>('osc.oscRemoteAddress', '127.0.0.1') || '127.0.0.1',
         remotePort: cfg.get<number>('osc.oscRemotePort', 57122) || 57122,
     };
+}
+
+function getOscEnabled(): boolean {
+    try {
+        return vscode.workspace.getConfiguration('P5Studio').get<boolean>('osc.enableOSC', false) === true;
+    } catch { return false; }
 }
 
 function getSingleP5Panel(): boolean {
@@ -187,11 +199,12 @@ export const config = {
     getEditorFontSize,
     getReloadWhileTyping,
     getReloadOnSave,
+    getShowSetupReloadButton,
     getBlockSketchOnWarning(): boolean {
         return vscode.workspace.getConfiguration('P5Studio').get<boolean>('lint.BlockSketchOnWarning', true) === true;
     },
     getShowSetupNotification(): boolean {
-        return vscode.workspace.getConfiguration('P5Studio').get<boolean>('showSetupNotification', true) === true;
+        return vscode.workspace.getConfiguration('P5Studio').get<boolean>('showSetupNotification', false) === true;
     },
     getBlocklyTheme,
     resolveBlocklyTheme,
@@ -200,6 +213,7 @@ export const config = {
     getStrictLevel,
     getLogWarningsToOutput,
     getOscConfig,
+    getOscEnabled,
     getSingleP5Panel,
     setReloadWhileTyping,
     setShowDebugButton,

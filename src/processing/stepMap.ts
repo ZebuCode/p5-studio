@@ -156,7 +156,8 @@ export function buildStepMap(code: string): StepMap {
 
                 switch (node.type) {
                     case 'IfStatement': {
-                        // Do not step on the header; step into branch bodies only.
+                        // Step on the condition/header before entering branch bodies.
+                        pushStep(phase, node, functionName);
                         if (node.consequent && Array.isArray(node.consequent.body)) {
                             collectStatements(node.consequent.body, phase, functionName);
                         } else if (node.consequent) {

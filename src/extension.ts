@@ -151,9 +151,17 @@ export function activate(context: vscode.ExtensionContext) {
     updateOscStatusBar();
   });
   context.subscriptions.push(oscStatusBar);
-  oscStatusBar.show();
 
   let oscRunning = false;
+  function syncOscStatusBarVisibility() {
+    if (cfg.getOscEnabled()) {
+      updateOscStatusBar();
+      oscStatusBar.show();
+      return;
+    }
+    oscStatusBar.hide();
+  }
+
   function updateOscStatusBar() {
     // Theme-aware color logic for both running and stopped states
     // VS Code API does not expose theme name directly; fallback to document.body.className if available
@@ -197,6 +205,10 @@ export function activate(context: vscode.ExtensionContext) {
     remoteAddressOverride?: string,
     remotePortOverride?: number
   ) {
+    if (!cfg.getOscEnabled()) {
+      vscode.window.showInformationMessage('OSC is disabled. Enable "P5Studio.osc.enableOSC" to start the OSC server.');
+      return;
+    }
     if (oscService) return;
     let usedConfig;
     if (
@@ -243,12 +255,17 @@ export function activate(context: vscode.ExtensionContext) {
   }
 
   context.subscriptions.push(vscode.commands.registerCommand('P5Studio.toggleOscServer', async () => {
+    if (!cfg.getOscEnabled()) {
+      vscode.window.showInformationMessage('OSC is disabled. Enable "P5Studio.osc.enableOSC" to show and use OSC controls.');
+      return;
+    }
     if (oscRunning) {
       await stopOscServer();
     } else {
       await startOscServer();
     }
   }));
+  syncOscStatusBarVisibility();
 
   // (No auto-start of OSC server)
   // Helper: find active P5 panel
@@ -824,6 +841,25 @@ export function activate(context: vscode.ExtensionContext) {
   // Run initial semicolon lint on the active editor
   lintActiveEditor();
 
+  // Setup/Reload P5 Studio status bar button
+  const setupP5StudioStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 97);
+  setupP5StudioStatusBar.command = 'extension.setupOrReloadP5Studio';
+  context.subscriptions.push(setupP5StudioStatusBar);
+  function updateSetupP5StudioStatusBar() {
+    if (!cfg.getShowSetupReloadButton()) {
+      setupP5StudioStatusBar.hide();
+      return;
+    }
+    if (hasP5Project) {
+      setupP5StudioStatusBar.text = '$(refresh) Reload P5 Studio';
+      setupP5StudioStatusBar.tooltip = 'Reload P5 Studio (regenerate jsconfig.json for this project)';
+    } else {
+      setupP5StudioStatusBar.text = '$(tools) Setup P5 Studio';
+      setupP5StudioStatusBar.tooltip = 'Set up this workspace for P5 Studio';
+    }
+    setupP5StudioStatusBar.show();
+  }
+
 
   async function updateJsconfigTimestamps() {
     try {
@@ -876,6 +912,7 @@ export function activate(context: vscode.ExtensionContext) {
       }
       hasP5Project = found;
       vscode.commands.executeCommand('setContext', 'hasP5Project', hasP5Project);
+      updateSetupP5StudioStatusBar();
       // Re-evaluate status bar visibility
       updateJsOrTsContext();
     } catch { /* ignore */ }
@@ -1510,9 +1547,17 @@ export function activate(context: vscode.ExtensionContext) {
                 setGlobalValue: (docUri, name, value, opts) => variablesService.setGlobalValue(docUri, name, value, opts),
                 hasGlobalDefinition: (docUri, name) => variablesService.hasGlobalDefinition(docUri, name),
                 upsertLocal: (docUri, v) => variablesService.upsertLocalForDoc(docUri, v),
+                upsertParameter: (docUri, v) => variablesService.upsertParameterForDoc(docUri, v),
                 updateVariablesPanel,
                 isActivePanel: (p) => activeP5Panel === p,
               });
+              return;
+            } else if (msg.type === 'clearParameters') {
+              try {
+                const docUriStr = editor.document.uri.toString();
+                variablesService.clearParametersForDoc(docUriStr, Array.isArray(msg.names) ? msg.names : undefined);
+              } catch { }
+              updateVariablesPanel();
               return;
             }
             // Focus the script tab if requested from the webview
@@ -2399,6 +2444,57 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand('extension.reloadP5Studio', async () => {
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+      if (!workspaceFolder) {
+        vscode.window.showErrorMessage('Open a workspace folder first to reload P5 Studio.');
+        return;
+      }
+
+      const jsconfigPath = path.join(workspaceFolder.uri.fsPath, 'jsconfig.json');
+      let isP5Project = false;
+      if (fs.existsSync(jsconfigPath)) {
+        try {
+          const raw = fs.readFileSync(jsconfigPath, 'utf8');
+          const parsed = JSON.parse(raw);
+          const projectType = typeof parsed?.projectType === 'string' ? parsed.projectType.toLowerCase() : '';
+          isP5Project = projectType === 'p5' || projectType === 'p5js';
+        } catch { /* ignore parse errors */ }
+      }
+
+      if (!isP5Project) {
+        vscode.window.showWarningMessage('Reload P5 Studio requires a jsconfig.json with projectType "p5js". Use Setup P5 Studio first.');
+        return;
+      }
+
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'Reloading P5 Studio...',
+          cancellable: false,
+        },
+        async () => {
+          await refreshJsconfigIfMarkerPresent(context);
+          await vscode.commands.executeCommand('typescript.restartTsServer');
+        }
+      );
+
+      updateP5ProjectContext();
+      vscode.window.showInformationMessage('P5 Studio reloaded (jsconfig.json refreshed).');
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('extension.setupOrReloadP5Studio', async () => {
+      if (hasP5Project) {
+        await vscode.commands.executeCommand('extension.reloadP5Studio');
+        return;
+      }
+      await vscode.commands.executeCommand('extension.create-jsconfig');
+    })
+  );
+
   // Simple debouncers for config-driven broadcasts
   let _varPanelDebounceTimer: NodeJS.Timeout | undefined;
   let _showFpsDebounceTimer: NodeJS.Timeout | undefined;
@@ -2413,6 +2509,15 @@ export function activate(context: vscode.ExtensionContext) {
     try {
       // OSC config changes
       try { oscService?.handleConfigChange(e); } catch { }
+      if (e.affectsConfiguration('P5Studio.osc.enableOSC')) {
+        if (!cfg.getOscEnabled() && oscRunning) {
+          void stopOscServer();
+        }
+        syncOscStatusBarVisibility();
+      }
+      if (e.affectsConfiguration('P5Studio.showSetupReloadButton')) {
+        updateSetupP5StudioStatusBar();
+      }
 
       // Debounce delay for auto-reload
       if (e.affectsConfiguration('P5Studio.debounceDelay')) {
@@ -2763,4 +2868,3 @@ export function activate(context: vscode.ExtensionContext) {
 function isSingleP5PanelEnabled() {
   return cfg.getSingleP5Panel();
 }
-

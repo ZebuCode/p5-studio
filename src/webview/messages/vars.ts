@@ -32,7 +32,7 @@ export function handleUpdateGlobalVar(
     name: string;
     value: any;
     generatedAt?: number;
-    scope?: 'globals' | 'locals';
+    scope?: 'globals' | 'locals' | 'parameters';
   },
   deps: {
     getGlobalsForDoc: (docUri: string) => Array<{ name: string; value: any; type: string; readonly?: boolean }>;
@@ -40,13 +40,14 @@ export function handleUpdateGlobalVar(
     setGlobalValue: (docUri: string, name: string, value: any, opts?: { updatedAt?: number }) => void;
     hasGlobalDefinition: (docUri: string, name: string) => boolean;
     upsertLocal: (docUri: string, v: { name: string; value: any; type: string }) => void;
+    upsertParameter: (docUri: string, v: { name: string; value: any; type: string }) => void;
     updateVariablesPanel: () => void;
     isActivePanel: (panel: vscode.WebviewPanel) => boolean;
   }
 ) {
   try {
     const thisDocUri = params.editor.document.uri.toString();
-    if (params.scope === 'locals') {
+    const inferParamType = () => {
       let forcedType = 'string';
       try {
         if (Array.isArray(params.value)) forcedType = 'array';
@@ -54,7 +55,15 @@ export function handleUpdateGlobalVar(
         else if (typeof params.value === 'boolean') forcedType = 'boolean';
         else if (params.value && typeof params.value === 'object') forcedType = 'object';
       } catch { }
-      deps.upsertLocal(thisDocUri, { name: String(params.name), value: params.value, type: forcedType });
+      return forcedType;
+    };
+    if (params.scope === 'parameters') {
+      deps.upsertParameter(thisDocUri, { name: String(params.name), value: params.value, type: inferParamType() });
+      if (deps.isActivePanel(params.panel)) deps.updateVariablesPanel();
+      return;
+    }
+    if (params.scope === 'locals') {
+      deps.upsertLocal(thisDocUri, { name: String(params.name), value: params.value, type: inferParamType() });
       if (deps.isActivePanel(params.panel)) deps.updateVariablesPanel();
       return;
     }

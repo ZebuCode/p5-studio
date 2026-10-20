@@ -68,6 +68,14 @@ export async function handleReloadClicked(
     (panel as any)._autoStepTimer = null;
   }
   (panel as any)._autoStepMode = false;
+  try {
+    (panel as any)._lastPausedStepId = undefined;
+    (panel as any)._lastHighlightedStepId = undefined;
+    (panel as any)._lastPausedDisplayLine = undefined;
+    (panel as any)._lastHighlightedDisplayLine = undefined;
+    (panel as any)._continueSkipStepId = undefined;
+    (panel as any)._continueSkipConsumed = false;
+  } catch { }
 
   const rawCode = editor.document.getText();
   const templateInfo = findFirstTemplateLiteral(rawCode);

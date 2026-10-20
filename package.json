@@ -2,7 +2,7 @@
   "name": "p5-studio",
   "displayName": "P5 Studio",
   "description": "Live code p5js in VS Code",
-  "version": "1.2.11",
+  "version": "1.2.15",
   "icon": "images/ICON.png",
   "author": {
     "name": "peterdickx"
@@ -82,6 +82,16 @@
       {
         "command": "extension.create-jsconfig",
         "title": "Setup new p5 project",
+         "category": "P5 Studio"
+      },
+      {
+        "command": "extension.reloadP5Studio",
+        "title": "Reload P5 Studio",
+         "category": "P5 Studio"
+      },
+      {
+        "command": "extension.setupOrReloadP5Studio",
+        "title": "Setup/Reload P5 Studio",
          "category": "P5 Studio"
       },
       {
@@ -384,7 +394,7 @@
       "explorer/context": [
         {
           "command": "extension.publishP5Html",
-          "when": "resourceExtname == .js",
+          "when": "config.P5Studio.enablePublishHtml == true && resourceExtname == .js",
           "group": "5_decouple@98"
         },
         {
@@ -458,6 +468,12 @@
             "description": "Show the Record (Toggle Capture Panel) button in the editor title bar for p5 panels.",
             "order": 6
           },
+          "P5Studio.enablePublishHtml": {
+            "type": "boolean",
+            "default": true,
+            "description": "Show the Publish P5 HTML item in the file explorer context menu for JavaScript files.",
+            "order": 6.5
+          },
           "P5Studio.SingleP5Panel": {
             "type": "boolean",
             "default": true,
@@ -466,9 +482,15 @@
           },
           "P5Studio.showSetupNotification": {
             "type": "boolean",
-            "default": true,
-            "description": "Show a setup prompt when the workspace has no P5 marker (.p5). Choose 'Don't show again' to turn this off.",
+            "default": false,
+            "description": "Show a setup prompt when the workspace is not configured as a P5 project. Choose 'Don't show again' to turn this off.",
             "order": 8
+          },
+          "P5Studio.showSetupReloadButton": {
+            "type": "boolean",
+            "default": false,
+            "description": "Show the Setup/Reload P5 Studio status bar button.",
+            "order": 8.1
           },
           "P5Studio.showFPS": {
             "type": "boolean",
@@ -504,6 +526,12 @@
             "order": 9.5
           },
         
+          "P5Studio.osc.enableOSC": {
+            "type": "boolean",
+            "default": false,
+            "description": "Enable OSC integration.",
+            "order": 9.9
+          },
           "P5Studio.osc.oscRemoteAddress": {
             "type": "string",
             "default": "127.0.0.1",

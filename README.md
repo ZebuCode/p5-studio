@@ -29,10 +29,12 @@ Like this extension and want to support me? Buy me a coffee:
 - **Pause/Resume Draw Loop:** A context-aware pause/play button in the editor title bar lets you toggle the sketch loop (`noLoop()` / `loop()`) without reloading when your code defines `draw()`.
 - **Debugging and Stepping:** 
    - Step through your code line by line.
+   - Step on `if` / `else if` conditions before entering branch blocks.
    - Continue to the next breakpoint.
    - Automatically run stepping with configurable intervals.
    - Stop debugging at any time.
    - Visualize local variable values in the variables panel.
+   - Function parameters are shown in a separate **Parameters** table while stepping inside functions and are cleared when stepping out.
    - Loop-header locals (for example `for (let i = 0; ...)`) are shown while stepping.
    - Loop statements pause on their header for every iteration while stepping.
 - **Capture:** Record animations or graphics from the webview with a record button.
@@ -83,8 +85,10 @@ All settings live under the `P5 Studio` namespace. Configure them from VS Code s
 | `P5Studio.debounceDelay` | number (≥ `100`) | `250` | Debounce delay in milliseconds used when reload-on-typing is enabled. |
 | `P5Studio.variablePanelDebounceDelay` | number (≥ `10`) | `50` | Debounce delay in milliseconds before VARIABLE panel edits sync to the sketch. |
 | `P5Studio.showRecordButton` | boolean | `true` | Show the Record (Toggle Capture Panel) button in the editor title bar for P5 panels. |
+| `P5Studio.enablePublishHtml` | boolean | `true` | Show the Publish P5 HTML item in the file explorer context menu for JavaScript files. |
 | `P5Studio.SingleP5Panel` | boolean | `true` | Keep only one P5 webview open at a time; opening another closes existing panels. |
-| `P5Studio.showSetupNotification` | boolean | `true` | Display the setup prompt when no `.p5` marker is detected in the workspace. |
+| `P5Studio.showSetupNotification` | boolean | `false` | Display the setup prompt when the workspace is not configured as a P5 project. |
+| `P5Studio.showSetupReloadButton` | boolean | `false` | Show the Setup/Reload P5 Studio button in the status bar. |
 | `P5Studio.showFPS` | boolean | `false` | Overlay the current FPS (derived from `deltaTime`) in the top-left of the P5 webview. |
 | `P5Studio.editorFontSize` | number (≥ `6`) | `14` | Extension-managed editor font size mirrored to `editor.fontSize` on startup. |
 | `P5Studio.loopGuard.enabled` | boolean | `true` | Prevents infinite loops or runaway code from freezing your editor |

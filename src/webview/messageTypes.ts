@@ -9,6 +9,7 @@ export type WebviewToExtensionMessage =
     | { type: 'log'; message: any; focus?: boolean }
     | { type: 'showError'; message: string }
     | { type: 'loopGuardHit'; message?: string }
+    | { type: 'clearParameters'; names?: string[] }
     | { type: 'openLoopGuardSettings' }
     | { type: 'submitTopInputs'; values: any[] }
     | { type: 'reload-button-clicked'; preserveGlobals?: boolean }
@@ -49,6 +50,8 @@ export type ExtensionToWebviewMessage =
     | { type: 'requestGlobalsSnapshot' }
     | { type: 'step-advance' }
     | { type: 'set-step-into-target'; stepId: number }
+    | { type: 'set-step-into-active'; active: boolean }
+    | { type: 'step-into-now'; stepId: number }
     | { type: 'set-fast-continue'; enabled: boolean; breakpointLines?: number[]; breakpointStepIds?: number[]; skipStepId?: number }
     | { type: 'updateOverlayFontSize'; value: number }
     // Additional control/event messages used by the extension

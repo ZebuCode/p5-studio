@@ -8,6 +8,7 @@ export interface VariablesViewDeps {
   getDocUriForPanel: (panel: vscode.WebviewPanel | undefined) => vscode.Uri | undefined;
   getGlobalsForDoc: (docUri: string) => GlobalVar[];
   getLocalsForDoc: (docUri: string) => GlobalVar[];
+  getParametersForDoc: (docUri: string) => GlobalVar[];
   getLocalsHeadingForDoc: (docUri: string) => 'locals' | 'variables';
   getHasDrawForDoc: (docUri: string) => boolean;
   setGlobalValue: (docUri: string, name: string, value: any, opts?: { updatedAt?: number }) => void;
@@ -25,6 +26,7 @@ export function registerVariablesView(context: vscode.ExtensionContext, deps: Va
       const panel = deps.getActiveP5Panel();
       let globals: GlobalVar[] = [];
       let locals: GlobalVar[] = [];
+      let parameters: GlobalVar[] = [];
       let localsHeading: 'locals' | 'variables' = 'locals';
       let hasDraw = false;
       let forceRebuild = false;
@@ -33,6 +35,7 @@ export function registerVariablesView(context: vscode.ExtensionContext, deps: Va
         if (docUri) {
           globals = deps.getGlobalsForDoc(docUri) || [];
           locals = deps.getLocalsForDoc(docUri) || [];
+          parameters = deps.getParametersForDoc(docUri) || [];
           try {
             localsHeading = deps.getLocalsHeadingForDoc(docUri) || 'locals';
           } catch { }
@@ -42,7 +45,7 @@ export function registerVariablesView(context: vscode.ExtensionContext, deps: Va
           try { forceRebuild = !!deps.consumeForceRebuildForDoc?.(docUri); } catch { forceRebuild = false; }
         }
       }
-      variablesPanelView.webview.postMessage({ type: 'setVarsSplit', globals, locals, localsHeading, hasDraw, forceRebuild });
+      variablesPanelView.webview.postMessage({ type: 'setVarsSplit', globals, locals, parameters, localsHeading, hasDraw, forceRebuild });
     } catch { }
   }
 
@@ -404,6 +407,7 @@ export function registerVariablesView(context: vscode.ExtensionContext, deps: Va
       <div id="variables-empty-state" class="muted" style="display:none;">No variables</div>
       <div id="globals-table"></div>
       <div id="locals-table"></div>
+      <div id="parameters-table"></div>
     </div>
           <script>
 // Acquire VS Code API once and reuse (be defensive: avoid ReferenceError in some webview contexts)
@@ -413,6 +417,7 @@ const vscode = (typeof acquireVsCodeApi === 'function')
 const emptyStateEl = document.getElementById('variables-empty-state');
 const globalsTableEl = document.getElementById('globals-table');
 const localsTableEl = document.getElementById('locals-table');
+const parametersTableEl = document.getElementById('parameters-table');
 const RESPONSIVE_VALUE_MIN_PX = 256;
 const RESPONSIVE_SLIDER_MIN_PX = 140;
 // Type column visibility: consider combined width of Name + Value columns
@@ -478,6 +483,7 @@ function updateTypeColumnVisibilityIn(containerEl) {
 function updateTypeColumnVisibilityAll() {
   updateTypeColumnVisibilityIn(globalsTableEl);
   updateTypeColumnVisibilityIn(localsTableEl);
+  updateTypeColumnVisibilityIn(parametersTableEl);
 }
 
 // Keep responsive state updated when the view resizes.
@@ -492,6 +498,7 @@ try {
 
 var _localsHeading = 'locals';
 function getColumnLabel(scope) {
+  if (scope === 'parameters') return 'Parameters';
   if (_localsHeading === 'variables') return 'Variable(s)';
   return scope === 'globals' ? 'Global vars' : 'Local vars';
 }
@@ -604,17 +611,20 @@ function toggleEmptyState(show) {
     emptyStateEl.style.display = 'block';
     if (globalsTableEl) globalsTableEl.style.display = 'none';
     if (localsTableEl) localsTableEl.style.display = 'none';
+    if (parametersTableEl) parametersTableEl.style.display = 'none';
     return true;
   }
   emptyStateEl.style.display = 'none';
   if (globalsTableEl) globalsTableEl.style.display = 'block';
   if (localsTableEl) localsTableEl.style.display = 'block';
+  if (parametersTableEl) parametersTableEl.style.display = 'block';
   return false;
 }
 // Live-patch support to avoid rebuilding the table on each update
 var _rendered = false;
 var _globalsIndex = new Map(); // name -> { type, control, readonly }
 var _localsIndex = new Map();
+var _parametersIndex = new Map();
 // Track whether current sketch has a draw() function so we can allow editing
 var _hasDraw = false;
 function normalizeForInput(type, v) {
@@ -764,19 +774,25 @@ function buildTable(targetId, vars, scope) {
   if (!tableDiv) return;
   if (!vars.length) {
     tableDiv.innerHTML = '';
-    if (scope === 'globals') _globalsIndex = new Map(); else _localsIndex = new Map();
+    if (scope === 'globals') _globalsIndex = new Map();
+    else if (scope === 'locals') _localsIndex = new Map();
+    else _parametersIndex = new Map();
     return;
   }
 
   var colLabel = getColumnLabel(scope);
   var html = '<table><thead><tr><th class="name-col">' + colLabel + '</th><th class="value-col">Value</th><th class="type-col">Type</th></tr></thead><tbody>';
-  if (scope === 'globals') _globalsIndex = new Map(); else _localsIndex = new Map();
+  if (scope === 'globals') _globalsIndex = new Map();
+  else if (scope === 'locals') _localsIndex = new Map();
+  else _parametersIndex = new Map();
   for (var i = 0; i < vars.length; ++i) {
 
     var v = vars[i];
     var sliderControl = (v && v.control && v.control.kind === 'slider') ? v.control : null;
     var controlSig = sliderControl ? JSON.stringify([sliderControl.kind, sliderControl.min, sliderControl.max, sliderControl.step]) : '';
-    if (scope === 'globals') _globalsIndex.set(v.name, { type: v.type, control: controlSig, readonly: !!v.readonly }); else _localsIndex.set(v.name, { type: v.type, control: controlSig, readonly: false });
+    if (scope === 'globals') _globalsIndex.set(v.name, { type: v.type, control: controlSig, readonly: !!v.readonly });
+    else if (scope === 'locals') _localsIndex.set(v.name, { type: v.type, control: controlSig, readonly: false });
+    else _parametersIndex.set(v.name, { type: v.type, control: controlSig, readonly: true });
     var isGlobal = scope === 'globals';
     var showReadonlyLock = isGlobal && !!v.readonly;
     var valueCellClass = showReadonlyLock ? 'value-col readonly-cell' : 'value-col';
@@ -999,12 +1015,14 @@ function patchValues(targetId, vars, scope) {
   if (!tableDiv) return;
   if (!vars.length) {
     tableDiv.innerHTML = '';
-    if (scope === 'globals') _globalsIndex = new Map(); else _localsIndex = new Map();
+    if (scope === 'globals') _globalsIndex = new Map();
+    else if (scope === 'locals') _localsIndex = new Map();
+    else _parametersIndex = new Map();
     pruneInvalidForScope(scope, []);
     return;
   }
   var needRebuild = false;
-  var indexMap = scope === 'globals' ? _globalsIndex : _localsIndex;
+  var indexMap = scope === 'globals' ? _globalsIndex : (scope === 'locals' ? _localsIndex : _parametersIndex);
   if (indexMap.size !== vars.length) needRebuild = true;
   for (var i = 0; i < vars.length && !needRebuild; ++i) {
     var v = vars[i];
@@ -1085,6 +1103,7 @@ window.addEventListener('message', function(event) {
   if (event.data && event.data.type === 'setVarsSplit') {
     var globals = event.data.globals || [];
     var locals = event.data.locals || [];
+    var parameters = event.data.parameters || [];
     var nextHasDraw = !!event.data.hasDraw;
     if (nextHasDraw !== _hasDraw) {
       _hasDraw = nextHasDraw;
@@ -1104,7 +1123,7 @@ window.addEventListener('message', function(event) {
       }
     }
     if (headingChanged) _rendered = false;
-    if (toggleEmptyState(globals.length === 0 && locals.length === 0)) {
+    if (toggleEmptyState(globals.length === 0 && locals.length === 0 && parameters.length === 0)) {
       _rendered = false;
       return;
     }
@@ -1112,9 +1131,11 @@ window.addEventListener('message', function(event) {
     if (!_rendered) {
       buildTable('globals-table', globals, 'globals');
       buildTable('locals-table', locals, 'locals');
+      buildTable('parameters-table', parameters, 'parameters');
     } else {
       patchValues('globals-table', globals, 'globals');
       patchValues('locals-table', locals, 'locals');
+      patchValues('parameters-table', parameters, 'parameters');
     }
     updateTypeColumnVisibilityAll();
   }

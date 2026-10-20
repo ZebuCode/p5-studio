@@ -2192,6 +2192,28 @@ window.addEventListener("message", e => {
       try {
         const n = Number(data.stepId);
         window.__liveP5StepIntoTargetStepId = (Number.isFinite(n) && n >= 1) ? Math.trunc(n) : 0;
+        // Arm step-into immediately as a fallback for terminal call-site edges
+        // where target-step matching may be skipped by finalization flow.
+        if (window.__liveP5StepIntoTargetStepId > 0) {
+          window.__liveP5StepIntoActive = true;
+        }
+      } catch {}
+      break;
+    case 'set-step-into-active':
+      try {
+        window.__liveP5StepIntoActive = !!data.active;
+      } catch {}
+      break;
+    case 'step-into-now':
+      try {
+        const n = Number(data.stepId);
+        window.__liveP5StepIntoTargetStepId = (Number.isFinite(n) && n >= 1) ? Math.trunc(n) : 0;
+        if (window.__liveP5StepIntoTargetStepId > 0) {
+          window.__liveP5StepIntoActive = true;
+        }
+        if (typeof window.__liveP5StepAdvance === 'function' && window.__liveP5StepResolve) {
+          window.__liveP5StepAdvance();
+        }
       } catch {}
       break;
     case 'set-fast-continue':

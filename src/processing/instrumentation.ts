@@ -516,8 +516,9 @@ export function instrumentSetupForSingleStep(
         };
 
         const makeHighlightFromStep = (step: StepTarget) => {
-            const useLoc = step.loc;
-            const alreadyNormalized = false;
+            const mappedDocLoc = resolveDocLocForStep(step);
+            const useLoc = mappedDocLoc || step.loc;
+            const alreadyNormalized = !!mappedDocLoc;
             const line = typeof useLoc?.line === 'number' ? useLoc.line : 1;
             const column = typeof useLoc?.column === 'number' ? useLoc.column : 1;
             const endLine = typeof useLoc?.endLine === 'number' ? useLoc.endLine : line;
@@ -701,27 +702,46 @@ export function instrumentSetupForSingleStep(
                 // For custom functions, ensure we clear highlight and mark stepping done only after the last function step, not after the call site.
                 let _insertedFinalClear = false;
                 const isCustomFunction = node.id.name && asyncFunctionNames.has(node.id.name);
+                const makeLocalUpdatePost = (name: string, scope: 'locals' | 'parameters' = 'locals') => {
+                    const safeName = String(name);
+                    return b.tryStatement(
+                        b.blockStatement([
+                            b.expressionStatement(
+                                b.callExpression(
+                                    b.memberExpression(b.identifier('vscode'), b.identifier('postMessage')),
+                                    [b.objectExpression([
+                                        b.property('init', b.identifier('type'), b.literal('updateGlobalVar')),
+                                        b.property('init', b.identifier('scope'), b.literal(scope)),
+                                        b.property('init', b.identifier('name'), b.literal(safeName)),
+                                        b.property('init', b.identifier('value'), b.identifier(safeName))
+                                    ])]
+                                )
+                            )
+                        ]),
+                        b.catchClause(b.identifier('_'), null, b.blockStatement([]))
+                    );
+                };
+                const functionParamNames: string[] = (() => {
+                    try {
+                        const out: string[] = [];
+                        const params = Array.isArray(node.params) ? node.params : [];
+                        for (const p of params) {
+                            if (!p) continue;
+                            if (p.type === 'Identifier' && p.name) {
+                                out.push(String(p.name));
+                            } else if (p.type === 'AssignmentPattern' && p.left && p.left.type === 'Identifier' && p.left.name) {
+                                out.push(String(p.left.name));
+                            } else if (p.type === 'RestElement' && p.argument && p.argument.type === 'Identifier' && p.argument.name) {
+                                out.push(String(p.argument.name));
+                            }
+                        }
+                        return out;
+                    } catch {
+                        return [];
+                    }
+                })();
                 const injectIntoStatements = (stmts: any[], inLoop: boolean = false): any[] => {
                     const result: any[] = [];
-                    const makeLocalUpdatePost = (name: string) => {
-                        const safeName = String(name);
-                        return b.tryStatement(
-                            b.blockStatement([
-                                b.expressionStatement(
-                                    b.callExpression(
-                                        b.memberExpression(b.identifier('vscode'), b.identifier('postMessage')),
-                                        [b.objectExpression([
-                                            b.property('init', b.identifier('type'), b.literal('updateGlobalVar')),
-                                            b.property('init', b.identifier('scope'), b.literal('locals')),
-                                            b.property('init', b.identifier('name'), b.literal(safeName)),
-                                            b.property('init', b.identifier('value'), b.identifier(safeName))
-                                        ])]
-                                    )
-                                )
-                            ]),
-                            b.catchClause(b.identifier('_'), null, b.blockStatement([]))
-                        );
-                    };
                     const collectLoopIdentifiers = (expr: any, out: Set<string>) => {
                         if (!expr) return;
                         if (expr.type === 'Identifier') {
@@ -848,13 +868,17 @@ export function instrumentSetupForSingleStep(
                         const loc = execLoc && execLoc.start ? execLoc.start : null;
                         const match = loc ? phaseSteps.find(s => s.loc.line === loc.line && s.loc.column - 1 === loc.column) : undefined;
                         if (match) {
+                            const stepIntoTarget = resolveStepIntoTargetForStatement(stmt);
                             const isLoopStmt = (
                                 stmt.type === 'ForStatement' || stmt.type === 'ForInStatement' || stmt.type === 'ForOfStatement'
                                 || stmt.type === 'WhileStatement' || stmt.type === 'DoWhileStatement'
                             );
                             const guardedFunctionStep = isCustomFunction
                                 ? b.ifStatement(
-                                    b.memberExpression(b.identifier('window'), b.identifier('__liveP5StepIntoActive')),
+                                    b.logicalExpression('||',
+                                        b.memberExpression(b.identifier('window'), b.identifier('__liveP5StepIntoActive')),
+                                        b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueMode'))
+                                    ),
                                     b.blockStatement([
                                         makeHighlightFromStep(match),
                                         makeAwaitStep()
@@ -883,7 +907,7 @@ export function instrumentSetupForSingleStep(
                                 }
                                 if (isCustomFunction) {
                                     // Only clear highlight for custom function after its last step, but do NOT mark stepping done.
-                                    result.push(
+                                    postActions.push(
                                         b.expressionStatement(
                                             b.callExpression(
                                                 b.identifier('__clearHighlight'),
@@ -896,15 +920,17 @@ export function instrumentSetupForSingleStep(
                                     postActions.push(setFrameWaitExpr(false));
                                     postActions.push(setFrameInProgressExpr(false));
                                 } else if (node.id.name === 'setup') {
-                                    result.push(
-                                        b.expressionStatement(
-                                            b.callExpression(
-                                                b.identifier('__clearHighlight'),
-                                                [drawSteps.length === 0 ? b.literal(true) : b.literal(false)]
+                                    if (!stepIntoTarget) {
+                                        result.push(
+                                            b.expressionStatement(
+                                                b.callExpression(
+                                                    b.identifier('__clearHighlight'),
+                                                    [drawSteps.length === 0 ? b.literal(true) : b.literal(false)]
+                                                )
                                             )
-                                        )
-                                    );
-                                    _insertedFinalClear = true;
+                                        );
+                                        _insertedFinalClear = true;
+                                    }
                                 } else {
                                     result.push(
                                         b.expressionStatement(
@@ -922,7 +948,6 @@ export function instrumentSetupForSingleStep(
                                 }
                             }
 
-                            const stepIntoTarget = resolveStepIntoTargetForStatement(stmt);
                             if (stepIntoTarget) {
                                 result.push(makeStepIntoGuard(match, stepIntoTarget));
                             }
@@ -983,15 +1008,21 @@ export function instrumentSetupForSingleStep(
                             }
                             case 'IfStatement': {
                                 if (stmt.consequent) {
-                                    const bodyNodes = (stmt.consequent.body && Array.isArray(stmt.consequent.body)) ? stmt.consequent.body : [stmt.consequent];
-                                    stmt.consequent.body = injectIntoStatements(bodyNodes, inLoop);
+                                    if (stmt.consequent.type === 'BlockStatement') {
+                                        stmt.consequent.body = injectIntoStatements(stmt.consequent.body || [], inLoop);
+                                    } else {
+                                        const injectedConsequent = injectIntoStatements([stmt.consequent], inLoop);
+                                        if (injectedConsequent.length <= 1) stmt.consequent = injectedConsequent[0] || stmt.consequent;
+                                        else stmt.consequent = b.blockStatement(injectedConsequent);
+                                    }
                                 }
                                 if (stmt.alternate) {
-                                    if (stmt.alternate.body && Array.isArray(stmt.alternate.body)) {
-                                        stmt.alternate.body = injectIntoStatements(stmt.alternate.body, inLoop);
+                                    if (stmt.alternate.type === 'BlockStatement') {
+                                        stmt.alternate.body = injectIntoStatements(stmt.alternate.body || [], inLoop);
                                     } else {
                                         const altInjected = injectIntoStatements([stmt.alternate], inLoop);
-                                        stmt.alternate = altInjected[0] || stmt.alternate;
+                                        if (altInjected.length <= 1) stmt.alternate = altInjected[0] || stmt.alternate;
+                                        else stmt.alternate = b.blockStatement(altInjected);
                                     }
                                 }
                                 result.push(stmt);
@@ -1096,6 +1127,19 @@ export function instrumentSetupForSingleStep(
                 };
 
                 node.body.body = injectIntoStatements(node.body.body || [], false);
+                if (isCustomFunction && functionParamNames.length > 0) {
+                    const paramLocalPosts = functionParamNames.map((name) => makeLocalUpdatePost(name, 'parameters'));
+                    node.body.body = [
+                        b.ifStatement(
+                            b.logicalExpression('||',
+                                b.memberExpression(b.identifier('window'), b.identifier('__liveP5StepIntoActive')),
+                                b.memberExpression(b.identifier('window'), b.identifier('__liveP5ContinueMode'))
+                            ),
+                            b.blockStatement(paramLocalPosts)
+                        ),
+                        ...node.body.body
+                    ];
+                }
                 if (node.id.name === 'setup') {
                     node.body.body.push(markSetupDoneExpr());
                     node.body.body.push(setFrameWaitExpr(false));
@@ -1115,6 +1159,24 @@ export function instrumentSetupForSingleStep(
                     node.body.body.push(setFrameWaitExpr(false));
                     node.body.body.push(setFrameInProgressExpr(false));
                 } else if (isCustomFunction) {
+                    if (functionParamNames.length > 0) {
+                        node.body.body.push(
+                            b.tryStatement(
+                                b.blockStatement([
+                                    b.expressionStatement(
+                                        b.callExpression(
+                                            b.memberExpression(b.identifier('vscode'), b.identifier('postMessage')),
+                                            [b.objectExpression([
+                                                b.property('init', b.identifier('type'), b.literal('clearParameters')),
+                                                b.property('init', b.identifier('names'), b.arrayExpression(functionParamNames.map((name) => b.literal(name))))
+                                            ])]
+                                        )
+                                    )
+                                ]),
+                                b.catchClause(b.identifier('_'), null, b.blockStatement([]))
+                            )
+                        );
+                    }
                     node.body.body.push(
                         b.expressionStatement(
                             b.assignmentExpression('=',

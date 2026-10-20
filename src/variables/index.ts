@@ -8,6 +8,7 @@ type LocalsHeading = 'locals' | 'variables';
 export type VarState = {
   globals: VarEntry[];
   locals: VarEntry[];
+  parameters: VarEntry[];
   globalDefs: GlobalDefs;
   globalsSuppressed: boolean;
   pendingGlobals: VarEntry[];
@@ -33,7 +34,10 @@ export type VariablesServiceApi = {
   revealGlobalsForDoc: (docUri: string, count?: number) => void;
   setGlobalValue: (docUri: string, name: string, value: any, opts?: { updatedAt?: number }) => void;
   getLocalsForDoc: (docUri: string) => VarEntry[];
+  getParametersForDoc: (docUri: string) => VarEntry[];
   upsertLocalForDoc: (docUri: string, v: VarEntry) => void;
+  upsertParameterForDoc: (docUri: string, v: VarEntry) => void;
+  clearParametersForDoc: (docUri: string, names?: string[]) => void;
   clearForDoc: (docUri: string) => void;
   updateVariablesPanel: () => void;
   setLocalsHeadingForDoc: (docUri: string, heading: LocalsHeading) => void;
@@ -80,6 +84,7 @@ export function registerVariablesService(
       latestVarsByDoc.set(docUri, {
         globals: [],
         locals: [],
+        parameters: [],
         globalDefs: new Map(),
         globalsSuppressed: false,
         pendingGlobals: [],
@@ -189,6 +194,7 @@ export function registerVariablesService(
     getDocUriForPanel: (p) => deps.getDocUriForPanel(p),
     getGlobalsForDoc: (docUri: string) => ensure(docUri).globals,
     getLocalsForDoc: (docUri: string) => ensure(docUri).locals,
+    getParametersForDoc: (docUri: string) => ensure(docUri).parameters,
     getLocalsHeadingForDoc: (docUri: string) => ensure(docUri).localsHeading,
     getHasDrawForDoc: (docUri: string) => ensure(docUri).hasDraw,
     setGlobalValue: setGlobalValueInternal,
@@ -327,6 +333,7 @@ export function registerVariablesService(
         : [];
       st.globals = [];
       st.locals = [];
+      st.parameters = [];
       st.globalDefs = new Map();
       st.globalsSuppressed = true;
       st.pendingGlobals = snapshot;
@@ -373,12 +380,29 @@ export function registerVariablesService(
     },
     setGlobalValue: setGlobalValueInternal,
     getLocalsForDoc: (docUri: string) => ensure(docUri).locals,
+    getParametersForDoc: (docUri: string) => ensure(docUri).parameters,
     upsertLocalForDoc: (docUri: string, v: VarEntry) => {
       const st = ensure(docUri);
       const safeValue = cloneVarValue(v.value);
       const idx = st.locals.findIndex(x => x.name === v.name);
       if (idx >= 0) st.locals[idx] = { ...st.locals[idx], value: safeValue, type: v.type || st.locals[idx].type };
       else st.locals.push({ ...v, value: safeValue });
+    },
+    upsertParameterForDoc: (docUri: string, v: VarEntry) => {
+      const st = ensure(docUri);
+      const safeValue = cloneVarValue(v.value);
+      const idx = st.parameters.findIndex(x => x.name === v.name);
+      if (idx >= 0) st.parameters[idx] = { ...st.parameters[idx], value: safeValue, type: v.type || st.parameters[idx].type };
+      else st.parameters.push({ ...v, value: safeValue });
+    },
+    clearParametersForDoc: (docUri: string, names?: string[]) => {
+      const st = ensure(docUri);
+      if (!Array.isArray(names) || names.length === 0) {
+        st.parameters = [];
+        return;
+      }
+      const remove = new Set(names.map((n) => String(n)));
+      st.parameters = st.parameters.filter((p) => !remove.has(String(p.name)));
     },
     clearForDoc: (docUri: string) => { try { latestVarsByDoc.delete(docUri); } catch { } },
     updateVariablesPanel,
@@ -428,6 +452,7 @@ export function registerVariablesService(
         st.globals = [];
       }
       st.locals = [];
+      st.parameters = [];
       st.pendingGlobals = [];
       st.globalsSuppressed = st.globals.length === 0;
       st.forceRevealNextGlobals = true;

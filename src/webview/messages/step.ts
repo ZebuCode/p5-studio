@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { config as cfg } from '../../config';
-import { buildStepMap, StepMap } from '../../processing/stepMap';
+import { buildStepMap, StepMap, StepTarget } from '../../processing/stepMap';
 import { findFirstTemplateLiteral, formatTemplateLiteralError } from '../../processing/astHelpers';
 import { detectDrawFunction } from '../../utils/helpers';
 import type { VarControl } from '../../types';
@@ -65,6 +65,7 @@ function computeLineOffset(rawCode: string, wrappedCode: string, didWrap: boolea
 
 function computeContinueBreakpointStepIds(
   wrappedStepMap: StepMap | undefined,
+  docStepMap: StepMap | undefined,
   breakpointLines: Set<number>,
   lineOffset: number,
   didWrap: boolean
@@ -72,19 +73,82 @@ function computeContinueBreakpointStepIds(
   if (!wrappedStepMap || !Array.isArray(wrappedStepMap.steps) || wrappedStepMap.steps.length === 0) {
     return [];
   }
+  const normalizeSnippet = (text?: string) => String(text || '').replace(/\s+/g, ' ').trim();
+  const wrappedToDocLoc = (() => {
+    const out = new Map<number, { line: number; endLine: number }>();
+    if (!docStepMap || !Array.isArray(docStepMap.steps) || docStepMap.steps.length === 0) return null;
+    const map = new Map<string, StepTarget[]>();
+    for (const s of docStepMap.steps) {
+      if (!s || !s.loc) continue;
+      const key = `${s.phase}::${s.nodeType}::${normalizeSnippet(s.snippet)}::${s.functionName || ''}`;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(s);
+    }
+    const usage = new Map<string, number>();
+    for (const step of wrappedStepMap.steps) {
+      if (!step || typeof step.id !== 'number') continue;
+      const key = `${step.phase}::${step.nodeType}::${normalizeSnippet(step.snippet)}::${step.functionName || ''}`;
+      const matches = map.get(key);
+      if (!matches || matches.length === 0) continue;
+      const used = usage.get(key) || 0;
+      const idx = Math.min(used, matches.length - 1);
+      usage.set(key, used + 1);
+      const loc = matches[idx]?.loc;
+      if (!loc || typeof loc.line !== 'number') continue;
+      const endLine = typeof loc.endLine === 'number' ? loc.endLine : loc.line;
+      out.set(step.id, { line: loc.line, endLine });
+    }
+    return out;
+  })();
   const ids: number[] = [];
   const orderedBpLines = Array.from(breakpointLines).sort((a, b) => a - b);
   for (const bpLine of orderedBpLines) {
     let chosenId: number | undefined;
 
-    // Prefer an exact adjusted-line match first.
+    // First: exact mapped original/document line match (best for wrapped sketches).
     for (const step of wrappedStepMap.steps) {
       if (!step || !step.loc || typeof step.loc.line !== 'number' || typeof step.id !== 'number') continue;
-      const wrappedLine = step.loc.line;
-      const adjustedLine = (didWrap && lineOffset > 0) ? Math.max(1, wrappedLine - lineOffset) : wrappedLine;
-      if (adjustedLine === bpLine) {
+      const mappedDocLoc = wrappedToDocLoc?.get(step.id);
+      if (mappedDocLoc && bpLine === mappedDocLoc.line) {
         chosenId = step.id;
         break;
+      }
+    }
+
+    // Second: mapped range fallback for non-control-flow statements only.
+    if (typeof chosenId !== 'number') {
+      for (const step of wrappedStepMap.steps) {
+        if (!step || !step.loc || typeof step.loc.line !== 'number' || typeof step.id !== 'number') continue;
+        const mappedDocLoc = wrappedToDocLoc?.get(step.id);
+        if (!mappedDocLoc) continue;
+        const nodeType = String(step.nodeType || '');
+        const isControlHeader = (
+          nodeType === 'IfStatement'
+          || nodeType === 'SwitchStatement'
+          || nodeType === 'ForStatement'
+          || nodeType === 'ForInStatement'
+          || nodeType === 'ForOfStatement'
+          || nodeType === 'WhileStatement'
+          || nodeType === 'DoWhileStatement'
+        );
+        if (isControlHeader) continue;
+        if (bpLine >= mappedDocLoc.line && bpLine <= mappedDocLoc.endLine) {
+          chosenId = step.id;
+          break;
+        }
+      }
+    }
+
+    // Prefer an exact adjusted-line match first.
+    if (typeof chosenId !== 'number') {
+      for (const step of wrappedStepMap.steps) {
+        if (!step || !step.loc || typeof step.loc.line !== 'number' || typeof step.id !== 'number') continue;
+        const wrappedLine = step.loc.line;
+        const adjustedLine = (didWrap && lineOffset > 0) ? Math.max(1, wrappedLine - lineOffset) : wrappedLine;
+        if (adjustedLine === bpLine) {
+          chosenId = step.id;
+          break;
+        }
       }
     }
 
@@ -104,6 +168,18 @@ function computeContinueBreakpointStepIds(
     }
   }
   return ids;
+}
+
+function isFunctionPhaseStep(panel: vscode.WebviewPanel, stepId: number): boolean {
+  if (!Number.isFinite(stepId) || stepId < 1) return false;
+  try {
+    const wrappedStepMap = (panel as any)._debugWrappedStepMap as StepMap | undefined;
+    if (!wrappedStepMap || !Array.isArray(wrappedStepMap.steps)) return false;
+    const found = wrappedStepMap.steps.find(s => !!s && typeof s.id === 'number' && s.id === stepId);
+    return !!found && found.phase === 'function';
+  } catch {
+    return false;
+  }
 }
 
 export async function handleStepRunClicked(
@@ -162,6 +238,12 @@ export async function handleStepRunClicked(
 
   // If already stepping, enable auto-advance from current position
   if ((panel as any)._steppingActive) {
+    try {
+      const currentStepId = Number((panel as any)._lastHighlightedStepId || (panel as any)._lastPausedStepId || 0);
+      if (isFunctionPhaseStep(panel, currentStepId)) {
+        panel.webview.postMessage({ type: 'set-step-into-active', active: true });
+      }
+    } catch { }
     try { panel.webview.postMessage({ type: 'set-fast-continue', enabled: false }); } catch { }
     try { (panel as any)._continueBreakpointLines = undefined; } catch { }
     if (!(panel as any)._autoStepMode) {
@@ -176,6 +258,14 @@ export async function handleStepRunClicked(
   }
 
   // Not stepping yet: instrument with single-step and start auto-advance
+  try {
+    (panel as any)._lastPausedStepId = undefined;
+    (panel as any)._lastHighlightedStepId = undefined;
+    (panel as any)._lastPausedDisplayLine = undefined;
+    (panel as any)._lastHighlightedDisplayLine = undefined;
+    (panel as any)._continueSkipStepId = undefined;
+    (panel as any)._continueSkipConsumed = false;
+  } catch { }
   if (deps.hasNonTopInputUsage(rawCode)) {
     panel.webview.html = await deps.createHtml('', panel, deps.getExtensionPath(), { allowInteractiveTopInputs: deps.getAllowInteractiveTopInputs(), initialCaptureVisible: deps.getInitialCaptureVisible(panel) });
     setTimeout(() => { panel.webview.postMessage({ type: 'showError', message: 'input can only be used at the top' }); }, 150);
@@ -249,6 +339,7 @@ export async function handleStepRunClicked(
   try { (panel as any)._debugLineOffset = lineOffsetTotal; } catch { }
   try { (panel as any)._debugDidWrap = didWrap; } catch { }
   try { (panel as any)._debugWrappedStepMap = buildStepMap(wrapped); } catch { }
+  try { (panel as any)._debugDocStepMap = docStepMap; } catch { }
   const globalsPayload = (() => {
     const { globals } = deps.extractGlobalVariablesWithConflicts(wrapped);
     let filteredGlobals = globals.filter(g => ['number', 'string', 'boolean', 'array'].includes(g.type));
@@ -350,9 +441,10 @@ export async function handleContinueClicked(
   } catch { }
   bpSet.forEach((n) => breakpointLines.push(n));
   const wrappedStepMap = (panel as any)._debugWrappedStepMap as StepMap | undefined;
+  const docStepMap = (panel as any)._debugDocStepMap as StepMap | undefined;
   const lineOffset = Number((panel as any)._debugLineOffset || 0);
   const didWrap = !!(panel as any)._debugDidWrap;
-  const breakpointStepIds = computeContinueBreakpointStepIds(wrappedStepMap, bpSet, lineOffset, didWrap);
+  const breakpointStepIds = computeContinueBreakpointStepIds(wrappedStepMap, docStepMap, bpSet, lineOffset, didWrap);
   const skipStepId = Number((panel as any)._lastPausedStepId || 0);
   try {
     (panel as any)._continueSkipStepId = skipStepId > 0 ? skipStepId : undefined;
@@ -404,8 +496,7 @@ export async function handleStepIntoClicked(
 
   try { deps.setSteppingActive?.(docUri, true); } catch { }
   try { panel.webview.postMessage({ type: 'set-fast-continue', enabled: false }); } catch { }
-  try { panel.webview.postMessage({ type: 'set-step-into-target', stepId: Math.trunc(currentStepId) }); } catch { }
-  try { panel.webview.postMessage({ type: 'step-advance' }); } catch { }
+  try { panel.webview.postMessage({ type: 'step-into-now', stepId: Math.trunc(currentStepId) }); } catch { }
   try {
     const ch = deps.getOrCreateOutputChannel(docUri, fileName);
     ch.appendLine(`${deps.getTime()} [↘️INFO] Step Into requested at step ${Math.trunc(currentStepId)}.`);
@@ -475,6 +566,12 @@ export async function handleSingleStepClicked(
     if (wasAutoStepMode) {
       try { const ch = deps.getOrCreateOutputChannel(docUri, fileName); ch.appendLine(`${deps.getTime()} [⏯️INFO] Switched to SINGLE-STEP, click again to step trough statements.`); } catch { }
     }
+    try {
+      const currentStepId = Number((panel as any)._lastHighlightedStepId || (panel as any)._lastPausedStepId || 0);
+      if (isFunctionPhaseStep(panel, currentStepId)) {
+        panel.webview.postMessage({ type: 'set-step-into-active', active: true });
+      }
+    } catch { }
     try { deps.setSteppingActive?.(docUri, true); } catch { }
     panel.webview.postMessage({ type: 'step-advance' });
     return;
@@ -485,6 +582,14 @@ export async function handleSingleStepClicked(
     const ch = deps.getOrCreateOutputChannel(docUri, fileName);
     if (wasAutoStepMode) ch.appendLine(`${deps.getTime()} [⏯️INFO] Switched to SINGLE-STEP, click again to step trough statements.`);
     else ch.appendLine(`${deps.getTime()} [⏯️INFO] SINGLE-STEP started, click again to step trough statements.`);
+  } catch { }
+  try {
+    (panel as any)._lastPausedStepId = undefined;
+    (panel as any)._lastHighlightedStepId = undefined;
+    (panel as any)._lastPausedDisplayLine = undefined;
+    (panel as any)._lastHighlightedDisplayLine = undefined;
+    (panel as any)._continueSkipStepId = undefined;
+    (panel as any)._continueSkipConsumed = false;
   } catch { }
 
   if (deps.hasNonTopInputUsage(rawCode)) {
@@ -552,6 +657,7 @@ export async function handleSingleStepClicked(
   try { (panel as any)._debugLineOffset = lineOffsetTotal; } catch { }
   try { (panel as any)._debugDidWrap = didWrap; } catch { }
   try { (panel as any)._debugWrappedStepMap = buildStepMap(wrapped); } catch { }
+  try { (panel as any)._debugDocStepMap = docStepMap; } catch { }
   const globalsPayload = (() => {
     const { globals } = deps.extractGlobalVariablesWithConflicts(wrapped);
     let filteredGlobals = globals.filter(g => ['number', 'string', 'boolean', 'array'].includes(g.type));

@@ -37,10 +37,11 @@ export function handleHighlightLine(
       } catch { }
     }
     lineSetHit = candidateLines.some((ln) => continueBreakpointSet.has(ln));
-    // In continue mode with step-id instrumentation, runtime virtualBreakpoint is authoritative.
-    // Falling back to host line checks here can re-pause the currently skipped step.
+    // Prefer runtime step-id hits, but keep a line-based fallback when step-id mapping misses
+    // (e.g. wrapped/moved function bodies). Skip-step protection below still prevents
+    // immediately re-pausing on the current statement.
     if (typeof stepId === 'number') {
-      hasBreakpoint = virtualBreakpoint;
+      hasBreakpoint = virtualBreakpoint || lineSetHit || liveBreakpoint;
     } else {
       hasBreakpoint = virtualBreakpoint || lineSetHit || liveBreakpoint;
     }
