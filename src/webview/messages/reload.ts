@@ -5,7 +5,7 @@ import { injectLoopGuards } from '../../processing/loopGuards';
 import { instrumentRuntimeLineTracking } from '../../processing/instrumentation';
 
 export async function handleReloadClicked(
-  params: { panel: vscode.WebviewPanel; editor: vscode.TextEditor; preserveGlobals?: boolean },
+  params: { panel: vscode.WebviewPanel; editor: vscode.TextEditor; preserveGlobals?: boolean; loopPaused?: boolean },
   deps: {
     getTime: () => string;
     getOrCreateOutputChannel: (docUri: string, fileName: string) => vscode.OutputChannel;
@@ -91,7 +91,9 @@ export async function handleReloadClicked(
   const initialHasDraw = (() => {
     try { return detectDrawFunction(rawCode); } catch { return false; }
   })();
+  const runtimeLoopPaused = (typeof params.loopPaused === 'boolean') ? params.loopPaused : undefined;
   const prevLoopPaused = (() => {
+    if (typeof runtimeLoopPaused === 'boolean') return runtimeLoopPaused;
     try { return deps.getDrawLoopPaused?.(docUri) ?? false; } catch { return false; }
   })();
   const targetLoopPaused = initialHasDraw ? prevLoopPaused : false;

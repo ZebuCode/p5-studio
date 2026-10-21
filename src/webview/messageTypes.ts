@@ -12,7 +12,7 @@ export type WebviewToExtensionMessage =
     | { type: 'clearParameters'; names?: string[] }
     | { type: 'openLoopGuardSettings' }
     | { type: 'submitTopInputs'; values: any[] }
-    | { type: 'reload-button-clicked'; preserveGlobals?: boolean }
+    | { type: 'reload-button-clicked'; preserveGlobals?: boolean; loopPaused?: boolean }
     | { type: 'context-menu-refresh' }
     | { type: 'context-menu-toggle-pause'; pause: boolean }
     | { type: 'context-menu-toggle-capture' }

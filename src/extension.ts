@@ -1669,7 +1669,7 @@ export function activate(context: vscode.ExtensionContext) {
             } else if (msg.type === 'reload-button-clicked') {
               syncLocalsHeadingForEditor(editor);
               syncTriggersForEditor(editor);
-              await handleReloadClicked({ panel, editor, preserveGlobals: !!msg.preserveGlobals }, {
+              await handleReloadClicked({ panel, editor, preserveGlobals: !!msg.preserveGlobals, loopPaused: (msg as any).loopPaused }, {
                 getTime,
                 getOrCreateOutputChannel,
                 clearStepHighlight,

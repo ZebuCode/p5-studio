@@ -1623,6 +1623,36 @@ function safeRemoveP5Instance(){
   try{window._p5Instance=null;}catch{}
 }
 
+function installP5LoopStateHooks() {
+  try {
+    const P5 = window.p5;
+    if (!P5 || !P5.prototype) return;
+    if (P5.prototype._p5StudioLoopStateHooked) return;
+    const proto = P5.prototype;
+    const origNoLoop = typeof proto.noLoop === 'function' ? proto.noLoop : null;
+    const origLoop = typeof proto.loop === 'function' ? proto.loop : null;
+    if (origNoLoop) {
+      proto.noLoop = function(...args) {
+        try {
+          window._p5LoopPaused = true;
+          window._p5PendingLoopPaused = true;
+        } catch {}
+        return origNoLoop.apply(this, args);
+      };
+    }
+    if (origLoop) {
+      proto.loop = function(...args) {
+        try {
+          window._p5LoopPaused = false;
+          window._p5PendingLoopPaused = false;
+        } catch {}
+        return origLoop.apply(this, args);
+      };
+    }
+    proto._p5StudioLoopStateHooked = true;
+  } catch {}
+}
+
 function runUserSketch(code){
   clearError();
   window._p5ErrorLogged = false;
@@ -1708,6 +1738,7 @@ function runUserSketch(code){
   }
 
   try {
+  try { installP5LoopStateHooks(); } catch {}
   window._p5Instance = new window.p5();
     // --- Stepping compatibility (p5 1.x):
     // When debug stepping, user draw() is instrumented as async and yields between statements.
@@ -2016,7 +2047,8 @@ window.addEventListener("message", e => {
     }
     case "invokeReload": {
       const preserveGlobals = (data && typeof data.preserveGlobals === 'boolean') ? !!data.preserveGlobals : true;
-      vscode.postMessage({type:"reload-button-clicked", preserveGlobals});
+      const loopPaused = !!window._p5LoopPaused;
+      vscode.postMessage({type:"reload-button-clicked", preserveGlobals, loopPaused});
       break;
     }
     case "invokeStepRun":
